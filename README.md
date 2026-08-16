@@ -106,7 +106,7 @@ By default, the proxy only sets sampling parameters if they are not already pres
 - **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to configure thinking mode and `preserve_thinking`, which defaults to `true` in Qwen 3.8)
 - **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied)
 - **`POST /v1/completions`**: Model name validated and swapped (no sampling params or thinking mode — raw prompt completions bypass the chat template)
-- **`POST /tokenize`**: Replaces virtual model names with backend model name and forwards to vLLM's `/tokenize`
+- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs`, and forwards to vLLM's `/tokenize`
 - **All other paths**: Passed through unchanged to the backend
 
 ## OpenAI SDK Examples
@@ -127,7 +127,7 @@ completion = client.chat.completions.create(
 
 ### Pre-configured model (reasoning_effort is enforced by the proxy)
 
-For clients that do not expose `reasoning_effort` (e.g., MSTY), use a pre-configured model. The proxy sets the effort automatically — any value sent by the client is ignored:
+For clients that expose a limited or mismatched set of `reasoning_effort` levels, use a pre-configured model. The proxy sets the correct effort automatically — any value sent by the client is ignored:
 
 ```python
 completion = client.chat.completions.create(
