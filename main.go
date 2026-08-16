@@ -36,7 +36,7 @@ func main() {
 	}
 
 	// Build virtual model profiles
-	profiles := buildModelProfiles(cfg.EnableExtendedModels)
+	profiles := buildModelProfiles(cfg.VirtualModelPrefix, cfg.EnableExtendedModels, cfg.NoInstruct)
 	virtualModels := make([]string, 0, len(profiles))
 	for name := range profiles {
 		virtualModels = append(virtualModels, name)
@@ -116,7 +116,9 @@ func main() {
 		slog.String("listen", cfg.Listen),
 		slog.Int("port", cfg.Port),
 		slog.String("target", backendURL.String()),
+		slog.String("virtual_model_prefix", cfg.VirtualModelPrefix),
 		slog.Bool("extended_models", cfg.EnableExtendedModels),
+		slog.Bool("no_instruct", cfg.NoInstruct),
 		slog.Int("virtual_models", len(virtualModels)),
 	)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

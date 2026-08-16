@@ -15,11 +15,11 @@ import (
 	"github.com/hekmon/httplog/v3"
 )
 
-// Hardcoded virtual model names for Qwen 3.8
+// Default virtual model suffixes for Qwen 3.8
 const (
-	instructModel         = "qwen38-instruct"
-	thinkingModel         = "qwen38-thinking"
-	thinkingPreserveModel = "qwen38-thinking-preserve"
+	instructSuffix         = "instruct"
+	thinkingSuffix         = "thinking"
+	thinkingPreserveSuffix = "thinking-preserve"
 )
 
 var extendedSuffixes = []string{"low", "medium", "xhigh"}
@@ -55,21 +55,28 @@ type ModelProfile struct {
 }
 
 // buildModelProfiles creates the virtual model registry.
-// Always includes the 3 base models; adds 6 pre-configured ones if enableExtended is true.
-func buildModelProfiles(enableExtended bool) map[string]ModelProfile {
-	profiles := map[string]ModelProfile{
-		instructModel: {
+// Uses prefix for model names; adds 6 pre-configured ones if enableExtended is true.
+// If noInstruct is true, the instruct model is omitted (for variants that do not support it).
+func buildModelProfiles(prefix string, enableExtended bool, noInstruct bool) map[string]ModelProfile {
+	instructModel := prefix + "-" + instructSuffix
+	thinkingModel := prefix + "-" + thinkingSuffix
+	thinkingPreserveModel := prefix + "-" + thinkingPreserveSuffix
+
+	profiles := map[string]ModelProfile{}
+
+	if !noInstruct {
+		profiles[instructModel] = ModelProfile{
 			Name: instructModel, Think: false, PreserveThinking: false,
 			Effort: "", SamplingParams: instructParams,
-		},
-		thinkingModel: {
-			Name: thinkingModel, Think: true, PreserveThinking: false,
-			Effort: "", SamplingParams: thinkingParams,
-		},
-		thinkingPreserveModel: {
-			Name: thinkingPreserveModel, Think: true, PreserveThinking: true,
-			Effort: "", SamplingParams: thinkingParams,
-		},
+		}
+	}
+	profiles[thinkingModel] = ModelProfile{
+		Name: thinkingModel, Think: true, PreserveThinking: false,
+		Effort: "", SamplingParams: thinkingParams,
+	}
+	profiles[thinkingPreserveModel] = ModelProfile{
+		Name: thinkingPreserveModel, Think: true, PreserveThinking: true,
+		Effort: "", SamplingParams: thinkingParams,
 	}
 
 	if enableExtended {

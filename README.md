@@ -11,13 +11,14 @@ Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve t
 This proxy's primary purpose is to:
 
 1. **Expose Qwen 3.8's official modes as virtual model names**, so no client-side change is required:
-   - **3 base models** (always exposed):
+   - **Up to 3 base models** (instruct can be disabled via `-no-instruct`):
      - `qwen38-instruct` — Native instruct mode (no reasoning)
      - `qwen38-thinking` — Native thinking mode, `reasoning_effort` controllable by the client
      - `qwen38-thinking-preserve` — Native thinking mode with historical thinking preservation, `reasoning_effort` controllable by the client
    - **6 optional pre-configured models** (enabled via `-enable-extended-models`):
      - `qwen38-thinking-low`, `qwen38-thinking-medium`, `qwen38-thinking-xhigh`
      - `qwen38-thinking-preserve-low`, `qwen38-thinking-preserve-medium`, `qwen38-thinking-preserve-xhigh`
+   - The prefix (`qwen38`) is customizable via `-virtual-model-prefix` to differentiate deployments when running multiple Qwen 3.8 variants.
 2. **Apply the official Qwen 3.8 sampling defaults** automatically for the selected mode:
    - **Thinking modes**: `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`
    - **Instruct mode**: `temperature=0.7`, `top_p=0.80`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
@@ -50,6 +51,19 @@ go build -o qwen38-rp .
   -enable-extended-models
 ```
 
+For the 2.4T-A95B variant (max model):
+
+```bash
+./qwen38-rp \
+  -target "http://127.0.0.1:8000" \
+  -served-model "Qwen/Qwen3.8-2.4T-A95B" \
+  -virtual-model-prefix "qwen38-2.4T" \
+  -no-instruct \
+  -enable-extended-models
+```
+
+> ⚠️ **Max model (2.4T-A95B) strongly recommends keeping thinking enabled.** Disabling thinking on this variant is not supported and produces poor results. Always use `-no-instruct` when proxying the max model so that clients cannot accidentally select an instruct (non-thinking) profile.
+
 Or using environment variables:
 
 ```bash
@@ -72,27 +86,31 @@ Configure the proxy using command-line flags or environment variables:
 | `-served-model` | `QWEN38RP_SERVED_MODEL_NAME` | (required) | Backend model name to use in outgoing requests |
 | `-enable-extended-models` | `QWEN38RP_ENABLE_EXTENDED_MODELS` | `false` | Expose the 6 pre-configured models (low/medium/xhigh) |
 | `-enforce-sampling-params` | `QWEN38RP_ENFORCE_SAMPLING_PARAMS` | `false` | Enforce sampling parameters, overriding client-provided values |
+| `-virtual-model-prefix` | `QWEN38RP_VIRTUAL_MODEL_PREFIX` | `qwen38` | Prefix for virtual model names (e.g. `qwen38-27B`) |
+| `-no-instruct` | `QWEN38RP_NO_INSTRUCT` | `false` | Disable the instruct virtual model. **Required for the 2.4T-A95B max model**, which does not support instruct mode and recommends keeping thinking enabled. |
 
 ### Virtual Model Behavior
 
-#### Base Models (always available)
+#### Base Models
+
+The instruct model is omitted when `-no-instruct` is set. This is **required for the 2.4T-A95B max model**, which does not support instruct mode and strongly recommends keeping thinking enabled at all times.
 
 | Model | `enable_thinking` | `preserve_thinking` | `reasoning_effort` | Sampling |
 |-------|-------------------|---------------------|--------------------|----------|
-| `qwen38-instruct` | `false` | — | — | Instruct |
-| `qwen38-thinking` | `true` | `false` | Client-controlled | Thinking |
-| `qwen38-thinking-preserve` | `true` | `true` | Client-controlled | Thinking |
+| `<prefix>-instruct` | `false` | — | — | Instruct |
+| `<prefix>-thinking` | `true` | `false` | Client-controlled | Thinking |
+| `<prefix>-thinking-preserve` | `true` | `true` | Client-controlled | Thinking |
 
 #### Extended Models (requires `-enable-extended-models`)
 
 | Model | `enable_thinking` | `preserve_thinking` | `reasoning_effort` |
 |-------|-------------------|---------------------|--------------------|
-| `qwen38-thinking-low` | `true` | `false` | `low` (immutable) |
-| `qwen38-thinking-medium` | `true` | `false` | `medium` (immutable) |
-| `qwen38-thinking-xhigh` | `true` | `false` | `xhigh` (immutable) |
-| `qwen38-thinking-preserve-low` | `true` | `true` | `low` (immutable) |
-| `qwen38-thinking-preserve-medium` | `true` | `true` | `medium` (immutable) |
-| `qwen38-thinking-preserve-xhigh` | `true` | `true` | `xhigh` (immutable) |
+| `<prefix>-thinking-low` | `true` | `false` | `low` (immutable) |
+| `<prefix>-thinking-medium` | `true` | `false` | `medium` (immutable) |
+| `<prefix>-thinking-xhigh` | `true` | `false` | `xhigh` (immutable) |
+| `<prefix>-thinking-preserve-low` | `true` | `true` | `low` (immutable) |
+| `<prefix>-thinking-preserve-medium` | `true` | `true` | `medium` (immutable) |
+| `<prefix>-thinking-preserve-xhigh` | `true` | `true` | `xhigh` (immutable) |
 
 **Golden rule:** pre-configured models are an immutable contract. The proxy always overrides `reasoning_effort` when they are called. This allows clients that do not expose `reasoning_effort` to access predefined reasoning profiles by simply selecting the appropriate model.
 
@@ -198,7 +216,7 @@ After=network.target
 Type=notify
 User=qwen38-rp
 Group=qwen38-rp
-ExecStart=/usr/local/bin/qwen38-rp -served-model "Qwen/Qwen3.8-27B" -enable-extended-models
+ExecStart=/usr/local/bin/qwen38-rp -served-model "Qwen/Qwen3.8-27B" -virtual-model-prefix "qwen38-27B" -enable-extended-models
 Restart=on-failure
 Environment=QWEN38RP_LOGLEVEL=INFO
 

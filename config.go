@@ -22,6 +22,8 @@ type Config struct {
 	ServedModelName       string
 	EnableExtendedModels  bool
 	EnforceSamplingParams bool
+	VirtualModelPrefix    string
+	NoInstruct            bool
 }
 
 func (c Config) Validate() error {
@@ -40,6 +42,9 @@ func (c Config) Validate() error {
 	if c.ServedModelName == "" {
 		return errors.New("served model name cannot be empty")
 	}
+	if c.VirtualModelPrefix == "" {
+		return errors.New("virtual model prefix cannot be empty")
+	}
 	return nil
 }
 
@@ -53,6 +58,8 @@ func LoadConfig() (Config, error) {
 	servedModel := flag.String("served-model", "", "Name of the served model")
 	enableExtended := flag.Bool("enable-extended-models", false, "Enable extended pre-configured virtual models (low/medium/xhigh)")
 	enforceSampling := flag.Bool("enforce-sampling-params", false, "Enforce sampling parameters, overriding client-provided values")
+	virtualModelPrefix := flag.String("virtual-model-prefix", "qwen38", "Prefix for virtual model names exposed by the proxy")
+	noInstruct := flag.Bool("no-instruct", false, "Disable the instruct virtual model (for models that do not support instruct mode)")
 
 	flag.Parse()
 
@@ -71,6 +78,11 @@ func LoadConfig() (Config, error) {
 		return cfg, err
 	}
 	cfg.EnforceSamplingParams, err = getEnvOrFlagBool(*enforceSampling, "QWEN38RP_ENFORCE_SAMPLING_PARAMS")
+	if err != nil {
+		return cfg, err
+	}
+	cfg.VirtualModelPrefix = getEnvOrFlag(*virtualModelPrefix, "QWEN38RP_VIRTUAL_MODEL_PREFIX")
+	cfg.NoInstruct, err = getEnvOrFlagBool(*noInstruct, "QWEN38RP_NO_INSTRUCT")
 	if err != nil {
 		return cfg, err
 	}
