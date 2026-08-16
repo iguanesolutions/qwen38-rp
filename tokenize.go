@@ -77,14 +77,6 @@ func tokenize(httpCli *http.Client, target *url.URL,
 			kwargsMap["preserve_thinking"] = profile.PreserveThinking
 			reqData["chat_template_kwargs"] = kwargsMap
 
-			// Enforce reasoning_effort for pre-configured models
-			if profile.Effort != "" {
-				logger.Debug("enforcing reasoning_effort for pre-configured model on tokenize",
-					slog.String("effort", profile.Effort),
-				)
-				reqData["reasoning_effort"] = profile.Effort
-			}
-
 			reqData["model"] = servedModel
 		}
 

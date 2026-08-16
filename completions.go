@@ -292,9 +292,13 @@ func transform(httpCli *http.Client, target *url.URL,
 
 		// Handle reasoning_effort for pre-configured models (immutable contract)
 		if profile.Effort != "" {
-			logger.Debug("enforcing reasoning_effort for pre-configured model",
-				slog.String("effort", profile.Effort),
-			)
+			if clientEffort, ok := data["reasoning_effort"].(string); ok && clientEffort != profile.Effort {
+				logger.Warn("overriding client reasoning_effort with pre-configured model value",
+					slog.String("virtual_model", modelName),
+					slog.String("client_effort", clientEffort),
+					slog.String("enforced_effort", profile.Effort),
+				)
+			}
 			data["reasoning_effort"] = profile.Effort
 		}
 		// For base thinking models, do NOT touch reasoning_effort if absent —
