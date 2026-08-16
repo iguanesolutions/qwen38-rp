@@ -8,7 +8,7 @@ Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve t
 
 ## Scope
 
-This proxy is designed **exclusively** for Qwen 3.8's text-based Chat Completions and Legacy Completions APIs. It does not support multimodal inputs or outputs.
+This proxy is designed for Qwen 3.8's Chat Completions and Legacy Completions APIs.
 
 ## Architecture & Design Philosophy
 
