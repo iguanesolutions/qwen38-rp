@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"path"
@@ -97,9 +98,7 @@ func models(httpCli *http.Client, target *url.URL, servedModel string, virtualMo
 		for _, vmName := range virtualModels {
 			// Clone the base model
 			vmMap := make(map[string]any)
-			for k, v := range baseModelMap {
-				vmMap[k] = v
-			}
+			maps.Copy(vmMap, baseModelMap)
 			// Override the id with virtual model name
 			vmMap["id"] = vmName
 			enrichedData = append(enrichedData, vmMap)
