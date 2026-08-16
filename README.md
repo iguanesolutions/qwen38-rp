@@ -1,4 +1,4 @@
-# qwen38-rp
+# Qwen 3.8 Reverse Proxy
 
 Use every official Qwen 3.8 mode — **without changing your OpenAI clients**.
 
