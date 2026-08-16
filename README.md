@@ -1,33 +1,37 @@
 # qwen38-rp
 
-Qwen 3.8 Reverse Proxy is a lightweight HTTP reverse proxy that automatically adjusts sampling parameters, thinking mode, reasoning effort, and `preserve_thinking` based on predefined virtual model profiles. It sits between your application and the backend LLM server serving Qwen 3.8 (e.g., vLLM).
+Use every official Qwen 3.8 mode — **without changing your OpenAI clients**.
+
+Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve thinking) and three reasoning effort levels. Activating them requires sending vendor-specific parameters such as `chat_template_kwargs` and `reasoning_effort`, which most standard OpenAI clients do not expose.
+
+**qwen38-rp** is a lightweight HTTP reverse proxy designed specifically to sit **in front of a vLLM backend serving Qwen 3.8**. It exposes each official Qwen 3.8 mode as a distinct virtual model name. Your client simply picks the model — the proxy automatically injects the correct `chat_template_kwargs`, sampling parameters, and reasoning effort required by the backend.
 
 ## Core Functionality
 
 This proxy's primary purpose is to:
 
-1. **Expose virtual model names** that encapsulate both the reasoning mode and sampling defaults:
+1. **Expose Qwen 3.8's official modes as virtual model names**, so no client-side change is required:
    - **3 base models** (always exposed):
-     - `qwen38-instruct` — No reasoning, standard sampling
-     - `qwen38-thinking` — Reasoning enabled, `reasoning_effort` configurable by the client
-     - `qwen38-thinking-preserve` — Reasoning enabled + historical thinking preservation, `reasoning_effort` configurable by the client
+     - `qwen38-instruct` — Native instruct mode (no reasoning)
+     - `qwen38-thinking` — Native thinking mode, `reasoning_effort` controllable by the client
+     - `qwen38-thinking-preserve` — Native thinking mode with historical thinking preservation, `reasoning_effort` controllable by the client
    - **6 optional pre-configured models** (enabled via `-enable-extended-models`):
      - `qwen38-thinking-low`, `qwen38-thinking-medium`, `qwen38-thinking-xhigh`
      - `qwen38-thinking-preserve-low`, `qwen38-thinking-preserve-medium`, `qwen38-thinking-preserve-xhigh`
-2. **Set appropriate sampling parameters** automatically based on the detected mode (official Qwen 3.8 recommended values):
+2. **Apply the official Qwen 3.8 sampling defaults** automatically for the selected mode:
    - **Thinking modes**: `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`
    - **Instruct mode**: `temperature=0.7`, `top_p=0.80`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
-3. **Configure thinking behavior** by setting `chat_template_kwargs`:
+3. **Activate the native thinking behavior** by injecting the `chat_template_kwargs` that Qwen 3.8 expects at runtime:
    - `enable_thinking=true` for thinking modes
-   - `enable_thinking=false` for instruct mode
-   - `preserve_thinking=true` for preserve models
-4. **Enforce immutable reasoning effort** on pre-configured models:
-   - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort`.
-   - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` if absent — the backend enforces its own default.
+   - `enable_thinking=false` for instruct modes
+   - `preserve_thinking=true` for preserve-thinking modes
+4. **Enforce the official reasoning effort** on pre-configured models:
+   - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort` with the official value.
+   - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` if absent — the backend applies its own default.
 5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
 6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
 7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
-8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name before forwarding to vLLM's `/tokenize`
+8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize`
 
 ## Installation
 
