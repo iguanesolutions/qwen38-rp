@@ -35,6 +35,13 @@ func main() {
 		log.Fatalf("load config: %s\n", err)
 	}
 
+	// Build virtual model profiles
+	profiles := buildModelProfiles(cfg.EnableExtendedModels)
+	virtualModels := make([]string, 0, len(profiles))
+	for name := range profiles {
+		virtualModels = append(virtualModels, name)
+	}
+
 	// Init
 	logger = autoslog.NewLogger(slog.HandlerOptions{
 		AddSource: true,
@@ -61,10 +68,7 @@ func main() {
 	httpClient := cleanhttp.DefaultPooledClient()
 	// Explicit handlers for POST paths that need transformation
 	http.HandleFunc("POST /tokenize", httplogger.LogFunc(
-		tokenize(httpClient, backendURL,
-			cfg.ServedModelName, cfg.ThinkingGeneralModel, cfg.ThinkingCodingModel,
-			cfg.InstructGeneralModel, cfg.InstructReasoningModel,
-		),
+		tokenize(httpClient, backendURL, cfg.ServedModelName, profiles),
 	))
 	http.HandleFunc("POST /v1/responses", httplogger.LogFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w,
@@ -73,22 +77,14 @@ func main() {
 		)
 	}))
 	http.HandleFunc("POST /v1/chat/completions", httplogger.LogFunc(
-		transform(httpClient, backendURL,
-			cfg.ServedModelName, cfg.ThinkingGeneralModel, cfg.ThinkingCodingModel,
-			cfg.InstructGeneralModel, cfg.InstructReasoningModel, cfg.EnforceSamplingParams,
-		),
+		transform(httpClient, backendURL, cfg.ServedModelName, profiles, cfg.EnforceSamplingParams),
 	))
 	http.HandleFunc("POST /v1/completions", httplogger.LogFunc(
-		legacyCompletions(httpClient, backendURL,
-			cfg.ServedModelName, cfg.ThinkingGeneralModel, cfg.ThinkingCodingModel,
-			cfg.InstructGeneralModel, cfg.InstructReasoningModel,
-		),
+		legacyCompletions(httpClient, backendURL, cfg.ServedModelName, profiles),
 	))
 	// Models endpoint handler (enriches backend models with virtual model names)
 	http.HandleFunc("GET /v1/models", httplogger.LogFunc(
-		models(httpClient, backendURL,
-			cfg.ServedModelName, cfg.ThinkingGeneralModel, cfg.ThinkingCodingModel,
-			cfg.InstructGeneralModel, cfg.InstructReasoningModel),
+		models(httpClient, backendURL, cfg.ServedModelName, virtualModels),
 	))
 	// Health check endpoints (not logged)
 	http.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +116,8 @@ func main() {
 		slog.String("listen", cfg.Listen),
 		slog.Int("port", cfg.Port),
 		slog.String("target", backendURL.String()),
+		slog.Bool("extended_models", cfg.EnableExtendedModels),
+		slog.Int("virtual_models", len(virtualModels)),
 	)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("failed to start HTTP server", "err", err)

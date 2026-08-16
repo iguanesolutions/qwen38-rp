@@ -15,38 +15,29 @@ import (
 	"github.com/hekmon/httplog/v3"
 )
 
+// Hardcoded virtual model names for Qwen 3.8
+const (
+	instructModel         = "qwen38-instruct"
+	thinkingModel         = "qwen38-thinking"
+	thinkingPreserveModel = "qwen38-thinking-preserve"
+)
+
+var extendedSuffixes = []string{"low", "medium", "xhigh"}
+
 var (
-	// Thinking mode for general tasks
-	thinkingGeneralParams = map[string]any{
+	// Thinking modes sampling parameters
+	thinkingParams = map[string]any{
 		"temperature":        1.0,
-		"top_p":              0.95,
-		"top_k":              20,
-		"min_p":              0.0,
-		"presence_penalty":   1.5,
-		"repetition_penalty": 1.0,
-	}
-	// Thinking mode for precise coding tasks
-	thinkingCodingParams = map[string]any{
-		"temperature":        0.6,
 		"top_p":              0.95,
 		"top_k":              20,
 		"min_p":              0.0,
 		"presence_penalty":   0.0,
 		"repetition_penalty": 1.0,
 	}
-	// Instruct mode for general tasks
-	instructGeneralParams = map[string]any{
+	// Instruct mode sampling parameters
+	instructParams = map[string]any{
 		"temperature":        0.7,
-		"top_p":              0.8,
-		"top_k":              20,
-		"min_p":              0.0,
-		"presence_penalty":   1.5,
-		"repetition_penalty": 1.0,
-	}
-	// Instruct mode for reasoning tasks
-	instructReasoningParams = map[string]any{
-		"temperature":        1.0,
-		"top_p":              0.95,
+		"top_p":              0.80,
 		"top_k":              20,
 		"min_p":              0.0,
 		"presence_penalty":   1.5,
@@ -54,12 +45,55 @@ var (
 	}
 )
 
+// ModelProfile defines the behavior of a virtual model.
+type ModelProfile struct {
+	Name             string
+	Think            bool
+	PreserveThinking bool
+	Effort           string // empty = client configurable; else "low", "medium", or "xhigh"
+	SamplingParams   map[string]any
+}
+
+// buildModelProfiles creates the virtual model registry.
+// Always includes the 3 base models; adds 6 pre-configured ones if enableExtended is true.
+func buildModelProfiles(enableExtended bool) map[string]ModelProfile {
+	profiles := map[string]ModelProfile{
+		instructModel: {
+			Name: instructModel, Think: false, PreserveThinking: false,
+			Effort: "", SamplingParams: instructParams,
+		},
+		thinkingModel: {
+			Name: thinkingModel, Think: true, PreserveThinking: false,
+			Effort: "", SamplingParams: thinkingParams,
+		},
+		thinkingPreserveModel: {
+			Name: thinkingPreserveModel, Think: true, PreserveThinking: true,
+			Effort: "", SamplingParams: thinkingParams,
+		},
+	}
+
+	if enableExtended {
+		for _, suffix := range extendedSuffixes {
+			profiles[thinkingModel+"-"+suffix] = ModelProfile{
+				Name: thinkingModel + "-" + suffix, Think: true, PreserveThinking: false,
+				Effort: suffix, SamplingParams: thinkingParams,
+			}
+			profiles[thinkingPreserveModel+"-"+suffix] = ModelProfile{
+				Name: thinkingPreserveModel + "-" + suffix, Think: true, PreserveThinking: true,
+				Effort: suffix, SamplingParams: thinkingParams,
+			}
+		}
+	}
+
+	return profiles
+}
+
 // legacyCompletions handles /v1/completions (text completions API).
 // Unlike chat completions, this endpoint uses raw prompts with no chat template.
 // We only validate the virtual model name, swap it to the served model, and fix
 // the model name in the response. No sampling params or chat_template_kwargs.
 func legacyCompletions(httpCli *http.Client, target *url.URL,
-	servedModel, thinkingGeneral, thinkingCoding, instructGeneral, instructReasoning string) http.HandlerFunc {
+	servedModel string, profiles map[string]ModelProfile) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
@@ -85,14 +119,13 @@ func legacyCompletions(httpCli *http.Client, target *url.URL,
 			return
 		}
 		// Validate virtual model name
-		switch modelName {
-		case thinkingGeneral, thinkingCoding, instructGeneral, instructReasoning:
-			logger.Info("legacy completions model matched", slog.String("virtual_model", modelName))
-		default:
+		if _, valid := profiles[modelName]; !valid {
 			logger.Error("unsupported model", slog.String("model", modelName))
 			httpError(ctx, w, http.StatusBadRequest)
 			return
 		}
+		logger.Info("legacy completions model matched", slog.String("virtual_model", modelName))
+
 		// Track streaming mode for response fixing
 		var stream bool
 		if streamVal, ok := data["stream"]; ok {
@@ -187,12 +220,12 @@ func fixModelNameInResponse(responseBody []byte, virtualModel string, logger *sl
 }
 
 func transform(httpCli *http.Client, target *url.URL,
-	servedModel, thinkingGeneral, thinkingCoding, instructGeneral, instructReasoning string, enforceSamplingParams bool) http.HandlerFunc {
+	servedModel string, profiles map[string]ModelProfile, enforceSamplingParams bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Prepare
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
-		var think, stream bool // Track thinking mode and streaming for response fixing
+		var stream bool // Track streaming for response fixing
 		// Read request body
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		requestBody, err := io.ReadAll(r.Body)
@@ -219,60 +252,55 @@ func transform(httpCli *http.Client, target *url.URL,
 		if streamVal, ok := data["stream"]; ok {
 			stream, _ = streamVal.(bool)
 		}
-		// check thinking mode based on model name and apply sampling parameters
-		switch modelName {
-		case thinkingGeneral:
-			think = true
-			logger.Info("model matched",
-				slog.String("type", "thinking_general"),
-				slog.String("virtual_model", modelName),
-			)
-			applySamplingParams(data, thinkingGeneralParams, logger, enforceSamplingParams)
-		case thinkingCoding:
-			think = true
-			logger.Info("model matched",
-				slog.String("type", "thinking_coding"),
-				slog.String("virtual_model", modelName),
-			)
-			applySamplingParams(data, thinkingCodingParams, logger, enforceSamplingParams)
-		case instructGeneral:
-			think = false
-			logger.Info("model matched",
-				slog.String("type", "instruct_general"),
-				slog.String("virtual_model", modelName),
-			)
-			applySamplingParams(data, instructGeneralParams, logger, enforceSamplingParams)
-		case instructReasoning:
-			think = false
-			logger.Info("model matched",
-				slog.String("type", "instruct_reasoning"),
-				slog.String("virtual_model", modelName),
-			)
-			applySamplingParams(data, instructReasoningParams, logger, enforceSamplingParams)
-		default:
+		// Resolve virtual model profile
+		profile, valid := profiles[modelName]
+		if !valid {
 			logger.Error("unsupported model", slog.String("model", modelName))
 			httpError(ctx, w, http.StatusBadRequest)
 			return
 		}
+
+		logger.Info("model matched",
+			slog.String("virtual_model", modelName),
+			slog.Bool("think", profile.Think),
+			slog.Bool("preserve_thinking", profile.PreserveThinking),
+			slog.String("effort", profile.Effort),
+		)
+
+		// Apply sampling parameters
+		applySamplingParams(data, profile.SamplingParams, logger, enforceSamplingParams)
+
 		// Track the virtual model name requested by client (before override)
 		virtualModel := modelName
-		// override model name for backend
+		// Override model name for backend
 		data["model"] = servedModel
-		// set thinking extra body parameter
+
+		// Set chat_template_kwargs
 		kwargs, ok := data["chat_template_kwargs"]
-		if ok && kwargs != nil {
-			kwargsMap, ok := kwargs.(map[string]any)
-			if !ok {
-				logger.Error("chat_template_kwargs is not a map[string]any")
-				httpError(ctx, w, http.StatusBadRequest)
-				return
-			}
-			kwargsMap["enable_thinking"] = think
-			data["chat_template_kwargs"] = kwargsMap
-		} else {
-			data["chat_template_kwargs"] = map[string]any{"enable_thinking": think}
+		if !ok || kwargs == nil {
+			kwargs = map[string]any{}
 		}
-		// marshal request body
+		kwargsMap, ok := kwargs.(map[string]any)
+		if !ok {
+			logger.Error("chat_template_kwargs is not a map[string]any")
+			httpError(ctx, w, http.StatusBadRequest)
+			return
+		}
+		kwargsMap["enable_thinking"] = profile.Think
+		kwargsMap["preserve_thinking"] = profile.PreserveThinking
+		data["chat_template_kwargs"] = kwargsMap
+
+		// Handle reasoning_effort for pre-configured models (immutable contract)
+		if profile.Effort != "" {
+			logger.Debug("enforcing reasoning_effort for pre-configured model",
+				slog.String("effort", profile.Effort),
+			)
+			data["reasoning_effort"] = profile.Effort
+		}
+		// For base thinking models, do NOT touch reasoning_effort if absent —
+		// the backend enforces its own default.
+
+		// Marshal request body
 		requestBody, err = json.Marshal(data)
 		if err != nil {
 			logger.Error("failed to marshal request body", slog.Any("error", err))
@@ -282,14 +310,14 @@ func transform(httpCli *http.Client, target *url.URL,
 		logger.Debug("rewritten request body", slog.String("body", string(requestBody)))
 		// Track modified request
 		modifiedRequests.Add(1)
-		// prepare outgoing request
+		// Prepare outgoing request
 		outreq := r.Clone(ctx)
 		rewriteRequestURL(outreq, target)
 		stripHopByHopHeaders(outreq)
 		outreq.Body = io.NopCloser(bytes.NewReader(requestBody))
 		outreq.ContentLength = int64(len(requestBody))
 		outreq.RequestURI = ""
-		// send request
+		// Send request
 		outResp, err := httpCli.Do(outreq)
 		if err != nil {
 			logger.Error("failed to send upstream request", slog.Any("error", err))
@@ -332,7 +360,7 @@ func transform(httpCli *http.Client, target *url.URL,
 
 			// Only attempt JSON fixes on success responses; pass through errors as-is
 			if outResp.StatusCode >= 200 && outResp.StatusCode < 300 {
-				responseBody = fixNonStreamingResponse(responseBody, think, virtualModel, logger)
+				responseBody = fixNonStreamingResponse(responseBody, profile.Think, virtualModel, logger)
 			} else {
 				logger.Warn("backend returned error for non-streaming request, passing through raw response",
 					slog.Int("status", outResp.StatusCode),
@@ -514,7 +542,10 @@ func fixModelNameInSSE(event []byte, virtualModel string, logger *slog.Logger) [
 	// Split event into lines, preserving structure
 	// Event includes trailing \n\n — trim it for processing, re-add at end
 	trimmed := bytes.TrimRight(event, "\n")
-	lines := bytes.Split(trimmed, []byte("\n"))
+	var lines [][]byte
+	for line := range bytes.SplitSeq(trimmed, []byte("\n")) {
+		lines = append(lines, line)
+	}
 
 	modified := false
 	for i, line := range lines {

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -62,7 +61,7 @@ func stripHopByHopHeaders(req *http.Request) {
 // If enforce is true, parameters are always set, overriding any client-provided values
 func applySamplingParams(data map[string]any, samplingParams map[string]any, logger *slog.Logger, enforce bool) {
 	for k, v := range samplingParams {
-		if existing, ok := data[k]; ok && existing != nil {
+		if _, ok := data[k]; ok {
 			if enforce {
 				logger.Debug("enforcing sampling parameter",
 					slog.Any("key", k),
@@ -99,7 +98,7 @@ func copyHeaders(w http.ResponseWriter, resp *http.Response) {
 // httpError writes an OpenAI-compatible JSON error response
 func httpError(ctx context.Context, w http.ResponseWriter, statusCode int) {
 	reqID := ctx.Value(httplog.ReqIDKey)
-	message := fmt.Sprintf("%s - check qwen35-rp logs for more details (request id #%v)",
+	message := fmt.Sprintf("%s - check qwen38-rp logs for more details (request id #%v)",
 		http.StatusText(statusCode),
 		reqID,
 	)
@@ -125,24 +124,4 @@ func readBodyStatusCode(err error) int {
 		return http.StatusRequestEntityTooLarge
 	}
 	return http.StatusInternalServerError
-}
-
-// extractSSEDataJSON extracts the JSON payload from an SSE event.
-// It handles multi-line events by scanning all lines for the first "data: " line
-// that contains parseable JSON (skipping [DONE] and empty data lines).
-// Returns nil if no valid JSON data line is found.
-func extractSSEDataJSON(event []byte) []byte {
-	trimmed := bytes.TrimRight(event, "\n\r ")
-	lines := bytes.Split(trimmed, []byte("\n"))
-	for _, line := range lines {
-		if !bytes.HasPrefix(line, []byte("data: ")) {
-			continue
-		}
-		jsonPart := bytes.TrimSpace(line[6:])
-		if len(jsonPart) == 0 || bytes.Equal(jsonPart, []byte("[DONE]")) {
-			continue
-		}
-		return jsonPart
-	}
-	return nil
 }

@@ -1,55 +1,58 @@
-# qwen35-rp
+# qwen38-rp
 
-Qwen 3.5 Reverse Proxy is a lightweight HTTP reverse proxy that automatically adjusts sampling parameters (temperature, top_p, etc.) and thinking mode based on one of four predefined profiles. It sits between your application and the backend LLM server serving Qwen 3.5 (e.g., vLLM). It also provides a `/tokenize` endpoint that replaces virtual model names with the backend model name before forwarding to vLLM.
+Qwen 3.8 Reverse Proxy is a lightweight HTTP reverse proxy that automatically adjusts sampling parameters, thinking mode, reasoning effort, and `preserve_thinking` based on predefined virtual model profiles. It sits between your application and the backend LLM server serving Qwen 3.8 (e.g., vLLM).
 
 ## Core Functionality
 
 This proxy's primary purpose is to:
 
-1. **Accept requests for four virtual model names** (configured via `-thinking-general`, `-thinking-coding`, `-instruct-general`, and `-instruct-reasoning`), rejecting all other model names with HTTP 400
-2. **Set appropriate sampling parameters** automatically based on one of four profiles (official Qwen-recommended values from [Hugging Face](https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8#using-qwen35-via-the-chat-completions-api)):
-   - **Thinking mode for general tasks**: `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
-   - **Thinking mode for precise coding tasks**: `temperature=0.6`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`
-   - **Instruct mode for general tasks**: `temperature=0.7`, `top_p=0.8`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
-   - **Instruct mode for reasoning tasks**: `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
-3. **Configure thinking mode** by setting `chat_template_kwargs.enable_thinking`:
-   - `enable_thinking=true` for thinking modes (general and coding)
-   - `enable_thinking=false` for instruct modes (general and reasoning)
-4. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.5-397B-A17B-FP8`) before forwarding to vLLM
-5. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
-6. **Enrich `/v1/models` endpoint** by fetching backend models and exposing 4 virtual models with the same metadata (permissions, max_model_len, etc.)
-7. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name before forwarding to vLLM's `/tokenize`
+1. **Expose virtual model names** that encapsulate both the reasoning mode and sampling defaults:
+   - **3 base models** (always exposed):
+     - `qwen38-instruct` — No reasoning, standard sampling
+     - `qwen38-thinking` — Reasoning enabled, `reasoning_effort` configurable by the client
+     - `qwen38-thinking-preserve` — Reasoning enabled + historical thinking preservation, `reasoning_effort` configurable by the client
+   - **6 optional pre-configured models** (enabled via `-enable-extended-models`):
+     - `qwen38-thinking-low`, `qwen38-thinking-medium`, `qwen38-thinking-xhigh`
+     - `qwen38-thinking-preserve-low`, `qwen38-thinking-preserve-medium`, `qwen38-thinking-preserve-xhigh`
+2. **Set appropriate sampling parameters** automatically based on the detected mode (official Qwen 3.8 recommended values):
+   - **Thinking modes**: `temperature=1.0`, `top_p=0.95`, `top_k=20`, `min_p=0.0`, `presence_penalty=0.0`, `repetition_penalty=1.0`
+   - **Instruct mode**: `temperature=0.7`, `top_p=0.80`, `top_k=20`, `min_p=0.0`, `presence_penalty=1.5`, `repetition_penalty=1.0`
+3. **Configure thinking behavior** by setting `chat_template_kwargs`:
+   - `enable_thinking=true` for thinking modes
+   - `enable_thinking=false` for instruct mode
+   - `preserve_thinking=true` for preserve models
+4. **Enforce immutable reasoning effort** on pre-configured models:
+   - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort`.
+   - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` if absent — the backend enforces its own default.
+5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
+6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
+7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
+8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name before forwarding to vLLM's `/tokenize`
 
 ## Installation
 
 Requirements: Go 1.24.2 or later
 
 ```bash
-go build -o qwen35-rp .
+go build -o qwen38-rp .
 ```
 
 ## Usage
 
 ```bash
-./qwen35-rp \
+./qwen38-rp \
   -target "http://127.0.0.1:8000" \
-  -served-model "Qwen/Qwen3.5-397B-A17B-FP8" \
-  -thinking-general "qwen-thinking-general" \
-  -thinking-coding "qwen-thinking-coding" \
-  -instruct-general "qwen-instruct-general" \
-  -instruct-reasoning "qwen-instruct-reasoning"
+  -served-model "Qwen/Qwen3.8-27B" \
+  -enable-extended-models
 ```
 
 Or using environment variables:
 
 ```bash
-export QWEN35RP_TARGET="http://127.0.0.1:8000"
-export QWEN35RP_SERVED_MODEL_NAME="Qwen/Qwen3.5-397B-A17B-FP8"
-export QWEN35RP_THINKING_GENERAL_MODEL="qwen-thinking-general"
-export QWEN35RP_THINKING_CODING_MODEL="qwen-thinking-coding"
-export QWEN35RP_INSTRUCT_GENERAL_MODEL="qwen-instruct-general"
-export QWEN35RP_INSTRUCT_REASONING_MODEL="qwen-instruct-reasoning"
-./qwen35-rp
+export QWEN38RP_TARGET="http://127.0.0.1:8000"
+export QWEN38RP_SERVED_MODEL_NAME="Qwen/Qwen3.8-27B"
+export QWEN38RP_ENABLE_EXTENDED_MODELS="true"
+./qwen38-rp
 ```
 
 ## Configuration
@@ -58,16 +61,36 @@ Configure the proxy using command-line flags or environment variables:
 
 | Flag | Environment Variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `-listen` | `QWEN35RP_LISTEN` | `0.0.0.0` | IP address to listen on |
-| `-port` | `QWEN35RP_PORT` | `9000` | Port to listen on |
-| `-target` | `QWEN35RP_TARGET` | `http://127.0.0.1:8000` | Backend target URL |
-| `-loglevel` | `QWEN35RP_LOGLEVEL` | `INFO` | Log level (COMPLETE, DEBUG, INFO, WARN, ERROR) |
-| `-served-model` | `QWEN35RP_SERVED_MODEL_NAME` | (required) | Backend model name to use in outgoing requests |
-| `-thinking-general` | `QWEN35RP_THINKING_GENERAL_MODEL` | `qwen3.5-thinking-general` | Name of the thinking-general model (incoming request identifier) |
-| `-thinking-coding` | `QWEN35RP_THINKING_CODING_MODEL` | `qwen3.5-thinking-coding` | Name of the thinking-coding model (incoming request identifier) |
-| `-instruct-general` | `QWEN35RP_INSTRUCT_GENERAL_MODEL` | `qwen3.5-instruct-general` | Name of the instruct-general model (incoming request identifier) |
-| `-instruct-reasoning` | `QWEN35RP_INSTRUCT_REASONING_MODEL` | `qwen3.5-instruct-reasoning` | Name of the instruct-reasoning model (incoming request identifier) |
-| `-enforce-sampling-params` | `QWEN35RP_ENFORCE_SAMPLING_PARAMS` | `false` | Enforce sampling parameters, overriding client-provided values |
+| `-listen` | `QWEN38RP_LISTEN` | `0.0.0.0` | IP address to listen on |
+| `-port` | `QWEN38RP_PORT` | `9000` | Port to listen on |
+| `-target` | `QWEN38RP_TARGET` | `http://127.0.0.1:8000` | Backend target URL |
+| `-loglevel` | `QWEN38RP_LOGLEVEL` | `INFO` | Log level (COMPLETE, DEBUG, INFO, WARN, ERROR) |
+| `-served-model` | `QWEN38RP_SERVED_MODEL_NAME` | (required) | Backend model name to use in outgoing requests |
+| `-enable-extended-models` | `QWEN38RP_ENABLE_EXTENDED_MODELS` | `false` | Expose the 6 pre-configured models (low/medium/xhigh) |
+| `-enforce-sampling-params` | `QWEN38RP_ENFORCE_SAMPLING_PARAMS` | `false` | Enforce sampling parameters, overriding client-provided values |
+
+### Virtual Model Behavior
+
+#### Base Models (always available)
+
+| Model | `enable_thinking` | `preserve_thinking` | `reasoning_effort` | Sampling |
+|-------|-------------------|---------------------|--------------------|----------|
+| `qwen38-instruct` | `false` | — | — | Instruct |
+| `qwen38-thinking` | `true` | `false` | Client-controlled | Thinking |
+| `qwen38-thinking-preserve` | `true` | `true` | Client-controlled | Thinking |
+
+#### Extended Models (requires `-enable-extended-models`)
+
+| Model | `enable_thinking` | `preserve_thinking` | `reasoning_effort` |
+|-------|-------------------|---------------------|--------------------|
+| `qwen38-thinking-low` | `true` | `false` | `low` (immutable) |
+| `qwen38-thinking-medium` | `true` | `false` | `medium` (immutable) |
+| `qwen38-thinking-xhigh` | `true` | `false` | `xhigh` (immutable) |
+| `qwen38-thinking-preserve-low` | `true` | `true` | `low` (immutable) |
+| `qwen38-thinking-preserve-medium` | `true` | `true` | `medium` (immutable) |
+| `qwen38-thinking-preserve-xhigh` | `true` | `true` | `xhigh` (immutable) |
+
+**Golden rule:** pre-configured models are an immutable contract. The proxy always overrides `reasoning_effort` when they are called. This allows clients that do not expose `reasoning_effort` to access predefined reasoning profiles by simply selecting the appropriate model.
 
 ### Enforce Sampling Parameters
 
@@ -75,16 +98,36 @@ By default, the proxy only sets sampling parameters if they are not already pres
 
 ## Request Routing
 
-- **`GET /v1/models`**: Enriched (fetches backend models, validates served model, exposes 4 virtual models)
-- **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to activate thinking mode)
-- **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode applied)
+- **`GET /v1/models`**: Enriched (fetches backend models, validates served model, exposes virtual models)
+- **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to configure thinking mode and `preserve_thinking`, which defaults to `true` in Qwen 3.8)
+- **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied)
 - **`POST /v1/completions`**: Model name validated and swapped (no sampling params or thinking mode — raw prompt completions bypass the chat template)
 - **`POST /tokenize`**: Replaces virtual model names with backend model name and forwards to vLLM's `/tokenize`
 - **All other paths**: Passed through unchanged to the backend
 
+## OpenAI SDK Example
+
+```python
+completion = client.chat.completions.create(
+    model="qwen38-thinking-preserve",  # or qwen38-instruct, qwen38-thinking, etc.
+    messages=messages,
+    extra_body={
+        "chat_template_kwargs": {
+            "enable_thinking": True,
+            "preserve_thinking": True,
+        },
+    },
+    reasoning_effort="xhigh",  # ignored for extended models — reasoning effort is prebaked
+    stream=True,
+    stream_options={"include_usage": True},
+)
+```
+
+When using a pre-configured model such as `qwen38-thinking-low`, you do not need to (and cannot) change `reasoning_effort` — the proxy enforces it automatically.
+
 ## Responses API
 
-The `/v1/responses` endpoint returns HTTP 501 Not Implemented by design. vLLM's Responses API endpoint does not support `chat_template_kwargs`, which is required to control Qwen's thinking mode (`enable_thinking=true` or `false`). Without this, the proxy cannot apply the four predefined profiles that adjust sampling parameters and thinking behavior. Use the Chat Completions API (`/v1/chat/completions`) instead.
+The `/v1/responses` endpoint returns HTTP 501 Not Implemented by design. vLLM's Responses API endpoint does not support `chat_template_kwargs`, which is required to control Qwen's thinking mode (`enable_thinking`) and `preserve_thinking`. In Qwen 3.8, `preserve_thinking` defaults to `true`, so without `chat_template_kwargs` the backend would remain in preserve-thinking mode regardless of the virtual model selected. The proxy cannot apply the predefined profiles that adjust sampling parameters and thinking behavior. Use the Chat Completions API (`/v1/chat/completions`) instead.
 
 ### vLLM Backend Requirements
 
@@ -95,11 +138,9 @@ For full functionality with thinking mode and tool calls using the Chat Completi
 --enable-auto-tool-choice --tool-call-parser=qwen3_coder  # Required for tool/function calls
 ```
 
-**Note**: These flags are only needed when using Chat Completions API (`/v1/chat/completions`). The Responses API (`/v1/responses`) is not yet supported.
-
 ## Tokenize API
 
-The proxy provides a `/tokenize` endpoint that forwards tokenization requests to vLLM's `/tokenize`. The proxy replaces virtual model names with the backend served model name, then forwards the request body unchanged. Two modes:
+The proxy provides a `/tokenize` endpoint that forwards tokenization requests to vLLM's `/tokenize`. The proxy replaces virtual model names with the backend served model name, injects `chat_template_kwargs` according to the virtual model profile (so that the chat template produces the same text as it would for chat completions), then forwards the request. Two modes:
 
 - **`{"prompt": "..."}`** — raw text tokenization, forwarded as-is. No chat template is applied.
 - **`{"messages": [...], "tools": [...]}`** — vLLM applies the model's chat template (`apply_chat_template`) then tokenizes the result. Messages and tools must be in Chat Completions API format (same as transformers `apply_chat_template`): a list of dictionaries with `role` and `content` keys.
@@ -137,25 +178,25 @@ Example systemd unit file:
 
 ```ini
 [Unit]
-Description=Qwen 3.5 Reverse Proxy
+Description=Qwen 3.8 Reverse Proxy
 After=network.target
 
 [Service]
 Type=notify
-User=qwen35-rp
-Group=qwen35-rp
-ExecStart=/usr/local/bin/qwen35-rp -served-model "Qwen/Qwen3.5-397B-A17B-FP8" -thinking-general "qwen-thinking-general" -thinking-coding "qwen-thinking-coding" -instruct-general "qwen-instruct-general" -instruct-reasoning "qwen-instruct-reasoning"
+User=qwen38-rp
+Group=qwen38-rp
+ExecStart=/usr/local/bin/qwen38-rp -served-model "Qwen/Qwen3.8-27B" -enable-extended-models
 Restart=on-failure
-Environment=QWEN35RP_LOGLEVEL=INFO
+Environment=QWEN38RP_LOGLEVEL=INFO
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-⚠️ **Security Best Practice**: Always run the proxy under a dedicated, unprivileged user account (e.g., `qwen35-rp`). Never run as root. Create the user with:
+⚠️ **Security Best Practice**: Always run the proxy under a dedicated, unprivileged user account (e.g., `qwen38-rp`). Never run as root. Create the user with:
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin qwen35-rp
-sudo chown qwen35-rp:qwen35-rp /usr/local/bin/qwen35-rp
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin qwen38-rp
+sudo chown qwen38-rp:qwen38-rp /usr/local/bin/qwen38-rp
 ```
 
 ## Graceful Shutdown

@@ -14,7 +14,7 @@ import (
 )
 
 func tokenize(httpCli *http.Client, target *url.URL,
-	servedModel, thinkingGeneral, thinkingCoding, instructGeneral, instructReasoning string) http.HandlerFunc {
+	servedModel string, profiles map[string]ModelProfile) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
@@ -28,7 +28,7 @@ func tokenize(httpCli *http.Client, target *url.URL,
 			return
 		}
 
-		// Parse as generic map to read only the model field
+		// Parse as generic map to read and modify fields
 		var reqData map[string]any
 		if err := json.Unmarshal(requestBody, &reqData); err != nil {
 			logger.Error("failed to parse body as JSON", slog.String("error", err.Error()))
@@ -36,29 +36,56 @@ func tokenize(httpCli *http.Client, target *url.URL,
 			return
 		}
 
+		modelName, _ := reqData["model"].(string)
+
 		// Act based on the model field
-		switch reqData["model"] {
+		switch modelName {
 		case "":
 			// by default vllm accept a empty model name as it serves only one model
 			logger.Debug("tokenize request received without a model name, accept it anyway and set the actual served model name",
 				slog.String("served_model", servedModel),
 			)
 			reqData["model"] = servedModel
-		case thinkingGeneral, thinkingCoding, instructGeneral, instructReasoning:
-			// user has provided a valid (virtual) model name
-			logger.Debug("tokenize request received with a valid virtual model name",
-				slog.Any("virtual_model", reqData["model"]),
-				slog.String("served_model", servedModel),
-			)
-			reqData["model"] = servedModel
 		default:
-			// invalid model name
-			logger.Error("tokenize request received with an invalid model name",
-				slog.Any("requested_model", reqData["model"]),
+			profile, valid := profiles[modelName]
+			if !valid {
+				logger.Error("tokenize request received with an invalid model name",
+					slog.String("requested_model", modelName),
+					slog.String("served_model", servedModel),
+				)
+				httpError(ctx, w, http.StatusBadRequest)
+				return
+			}
+
+			logger.Debug("tokenize request received with a valid virtual model name",
+				slog.String("virtual_model", modelName),
 				slog.String("served_model", servedModel),
 			)
-			httpError(ctx, w, http.StatusBadRequest)
-			return
+
+			// Apply the virtual model contract: inject chat_template_kwargs
+			kwargs, ok := reqData["chat_template_kwargs"]
+			if !ok || kwargs == nil {
+				kwargs = map[string]any{}
+			}
+			kwargsMap, ok := kwargs.(map[string]any)
+			if !ok {
+				logger.Error("chat_template_kwargs is not a map[string]any")
+				httpError(ctx, w, http.StatusBadRequest)
+				return
+			}
+			kwargsMap["enable_thinking"] = profile.Think
+			kwargsMap["preserve_thinking"] = profile.PreserveThinking
+			reqData["chat_template_kwargs"] = kwargsMap
+
+			// Enforce reasoning_effort for pre-configured models
+			if profile.Effort != "" {
+				logger.Debug("enforcing reasoning_effort for pre-configured model on tokenize",
+					slog.String("effort", profile.Effort),
+				)
+				reqData["reasoning_effort"] = profile.Effort
+			}
+
+			reqData["model"] = servedModel
 		}
 
 		// Marshal the modified request body
