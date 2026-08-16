@@ -105,25 +105,34 @@ By default, the proxy only sets sampling parameters if they are not already pres
 - **`POST /tokenize`**: Replaces virtual model names with backend model name and forwards to vLLM's `/tokenize`
 - **All other paths**: Passed through unchanged to the backend
 
-## OpenAI SDK Example
+## OpenAI SDK Examples
+
+### Base model (client controls reasoning_effort)
+
+When using a base model, the proxy injects `chat_template_kwargs` automatically. You only need to choose the model and optionally set `reasoning_effort`:
 
 ```python
 completion = client.chat.completions.create(
-    model="qwen38-thinking-preserve",  # or qwen38-instruct, qwen38-thinking, etc.
+    model="qwen38-thinking-preserve",
     messages=messages,
-    extra_body={
-        "chat_template_kwargs": {
-            "enable_thinking": True,
-            "preserve_thinking": True,
-        },
-    },
-    reasoning_effort="xhigh",  # ignored for extended models — reasoning effort is prebaked
+    reasoning_effort="xhigh",  # client-controlled for base models
     stream=True,
     stream_options={"include_usage": True},
 )
 ```
 
-When using a pre-configured model such as `qwen38-thinking-low`, you do not need to (and cannot) change `reasoning_effort` — the proxy enforces it automatically.
+### Pre-configured model (reasoning_effort is enforced by the proxy)
+
+For clients that do not expose `reasoning_effort` (e.g., MSTY), use a pre-configured model. The proxy sets the effort automatically — any value sent by the client is ignored:
+
+```python
+completion = client.chat.completions.create(
+    model="qwen38-thinking-medium",  # reasoning_effort="medium" is automatic
+    messages=messages,
+    stream=True,
+    stream_options={"include_usage": True},
+)
+```
 
 ## Responses API
 
