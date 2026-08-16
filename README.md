@@ -2,7 +2,7 @@
 
 Use every official Qwen 3.8 mode — **without changing your OpenAI clients**.
 
-Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve thinking) and three reasoning effort levels. Activating them requires sending vendor-specific parameters such as `chat_template_kwargs` and `reasoning_effort`, which most standard OpenAI clients do not expose.
+Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve thinking) and three reasoning effort levels. Activating them requires sending vendor-specific parameters such as `chat_template_kwargs`, which most standard OpenAI clients do not expose.
 
 **qwen38-rp** is a lightweight HTTP reverse proxy designed specifically to sit **in front of a vLLM backend serving Qwen 3.8**. It exposes each official Qwen 3.8 mode as a distinct virtual model name. Your client simply picks the model — the proxy automatically injects the correct `chat_template_kwargs`, sampling parameters, and reasoning effort required by the backend.
 
@@ -17,11 +17,6 @@ This proxy is a **vLLM enhancement layer**. It sits directly in front of a vLLM 
 - **No artificial timeouts:** LLM inference duration is inherently unpredictable. The proxy does not impose global request or response timeouts. Client disconnects cancel the request context, which propagates upstream immediately.
 - **Full body materialization:** Request bodies are always read entirely into memory to allow JSON rewriting. Non-streaming responses are also read in full to apply model-name fixes and vLLM bug workarounds. Streaming responses are processed incrementally (event by event) and are not held in memory.
 - **Single-target only:** The proxy forwards to one vLLM backend. It is not a load balancer.
-
-## What this is NOT
-
-- **Not a load balancer:** It targets a single vLLM instance.
-- **Not a general-purpose OpenAI proxy:** It is hard-coded for Qwen 3.8's chat template kwargs and sampling defaults.
 
 ## Core Functionality
 
@@ -45,7 +40,7 @@ This proxy's primary purpose is to:
    - `preserve_thinking=true` for preserve-thinking modes
 4. **Enforce the official reasoning effort** on pre-configured models:
    - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort` with the official value.
-   - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` if absent — the backend applies its own default.
+   - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` — if the client sends a value it is passed through unchanged; if it is absent the backend applies its own default.
 5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
 6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
 7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
@@ -130,7 +125,7 @@ The instruct model is omitted when `-no-instruct` is set. This is **required for
 | `<prefix>-thinking-preserve-medium` | `true` | `true` | `medium` (immutable) |
 | `<prefix>-thinking-preserve-xhigh` | `true` | `true` | `xhigh` (immutable) |
 
-**Golden rule:** pre-configured models are an immutable contract. The proxy always overrides `reasoning_effort` when they are called. This allows clients that do not expose `reasoning_effort` to access predefined reasoning profiles by simply selecting the appropriate model.
+**Golden rule:** extended models are an immutable contract. The proxy always overrides `reasoning_effort` when they are called. This allows clients that do not expose `reasoning_effort` to access predefined reasoning profiles by simply selecting the appropriate model.
 
 ### Enforce Sampling Parameters
 
