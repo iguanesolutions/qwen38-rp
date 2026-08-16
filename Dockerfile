@@ -11,8 +11,11 @@ ADD . /build
 RUN go build -v -trimpath -ldflags "-s -w" -o qwen38-rp .
 
 FROM ${app_image}:${app_tag}
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r qwen38rp && useradd -r -g qwen38rp qwen38rp
 COPY --from=go_build /build/qwen38-rp /usr/bin/qwen38-rp
+RUN chown qwen38rp:qwen38rp /usr/bin/qwen38-rp
+USER qwen38rp
 
 EXPOSE 9000
 
