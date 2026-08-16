@@ -48,6 +48,7 @@ go build -o qwen38-rp .
 ./qwen38-rp \
   -target "http://127.0.0.1:8000" \
   -served-model "Qwen/Qwen3.8-27B" \
+  -virtual-model-prefix "qwen38-27B" \
   -enable-extended-models
 ```
 
