@@ -6,6 +6,23 @@ Qwen 3.8 natively supports several runtime modes (instruct, thinking, preserve t
 
 **qwen38-rp** is a lightweight HTTP reverse proxy designed specifically to sit **in front of a vLLM backend serving Qwen 3.8**. It exposes each official Qwen 3.8 mode as a distinct virtual model name. Your client simply picks the model — the proxy automatically injects the correct `chat_template_kwargs`, sampling parameters, and reasoning effort required by the backend.
 
+## Scope
+
+This proxy is designed **exclusively** for Qwen 3.8's text-based Chat Completions and Legacy Completions APIs. It does not support multimodal inputs or outputs.
+
+## Architecture & Design Philosophy
+
+This proxy is a **vLLM enhancement layer**. It sits directly in front of a vLLM instance to inject Qwen 3.8-specific parameters, but otherwise preserves native vLLM behavior. It does not terminate TLS, authenticate clients, or rate limit, but it passes all headers—including `Authorization`—through to vLLM untouched. It shares vLLM's exposure boundary: do not expose this proxy to any network you would not expose vLLM itself to.
+
+- **No artificial timeouts:** LLM inference duration is inherently unpredictable. The proxy does not impose global request or response timeouts. Client disconnects cancel the request context, which propagates upstream immediately.
+- **Full body materialization:** Request bodies are always read entirely into memory to allow JSON rewriting. Non-streaming responses are also read in full to apply model-name fixes and vLLM bug workarounds. Streaming responses are processed incrementally (event by event) and are not held in memory.
+- **Single-target only:** The proxy forwards to one vLLM backend. It is not a load balancer.
+
+## What this is NOT
+
+- **Not a load balancer:** It targets a single vLLM instance.
+- **Not a general-purpose OpenAI proxy:** It is hard-coded for Qwen 3.8's chat template kwargs and sampling defaults.
+
 ## Core Functionality
 
 This proxy's primary purpose is to:

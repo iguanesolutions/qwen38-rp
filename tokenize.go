@@ -20,6 +20,8 @@ func tokenize(httpCli *http.Client, target *url.URL,
 		ctx := r.Context()
 
 		// Read request body
+		// Full body materialization is required to rewrite JSON fields in-place.
+		// This is acceptable for Qwen 3.8's text-only outputs.
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		requestBody, err := io.ReadAll(r.Body)
 		if err != nil {

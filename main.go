@@ -96,6 +96,8 @@ func main() {
 	http.HandleFunc("/", httplogger.LogFunc(passthrough(httpClient, backendURL)))
 
 	// Prepare HTTP server and clean stop
+	// Intentionally no ReadTimeout/WriteTimeout: LLM inference duration is client-dependent.
+	// Client disconnect cancels the request context, which propagates to the upstream.
 	server := &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Listen, cfg.Port)}
 	signalStopCtx, signalStopCtxCancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer signalStopCtxCancel()

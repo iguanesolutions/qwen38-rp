@@ -105,6 +105,8 @@ func legacyCompletions(httpCli *http.Client, target *url.URL,
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
 		// Read request body
+		// Full body materialization is required to rewrite JSON fields in-place.
+		// This is acceptable for Qwen 3.8's text-only outputs.
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		requestBody, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -234,6 +236,8 @@ func transform(httpCli *http.Client, target *url.URL,
 		ctx := r.Context()
 		var stream bool // Track streaming for response fixing
 		// Read request body
+		// Full body materialization is required to rewrite JSON fields in-place.
+		// This is acceptable for Qwen 3.8's text-only outputs.
 		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		requestBody, err := io.ReadAll(r.Body)
 		if err != nil {

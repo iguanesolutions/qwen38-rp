@@ -36,6 +36,7 @@ func models(httpCli *http.Client, target *url.URL, servedModel string, virtualMo
 		defer resp.Body.Close()
 
 		// Read backend response
+		// Full body materialization is required to rewrite JSON fields in-place.
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			logger.Error("failed to read models response", slog.Any("error", err))
