@@ -45,7 +45,7 @@ jobs:
 
       - name: Build, tag, and push docker image to GitHub Container Registry
         env:
-          REGISTRY: ghcr
+          REGISTRY: ghcr.io
           REPOSITORY: ${{ github.repository_owner }}/qwen38-rp
           IMAGE_TAG: ${{ github.ref_name }}
         run: |
@@ -54,7 +54,7 @@ jobs:
 
       - name: Also tag with latest
         env:
-          REGISTRY: ghcr
+          REGISTRY: ghcr.io
           REPOSITORY: ${{ github.repository_owner }}/qwen38-rp
           IMAGE_TAG: ${{ github.ref_name }}
         run: |
