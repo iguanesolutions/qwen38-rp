@@ -43,9 +43,10 @@ func main() {
 	}
 
 	// Init
+	logLevel := parseLogLevel(cfg.LogLevel)
 	logger = autoslog.NewLogger(slog.HandlerOptions{
-		AddSource: true,
-		Level:     parseLogLevel(cfg.LogLevel),
+		AddSource: logLevel <= slog.LevelDebug,
+		Level:     logLevel,
 	})
 	// Warn if COMPLETE log level is enabled
 	if cfg.LogLevel == COMPLETE_LEVEL {
