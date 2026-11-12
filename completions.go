@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -162,6 +163,26 @@ func chatTemplateKwargs(data map[string]any) (map[string]any, error) {
 		return nil, errors.New("chat_template_kwargs is not a map[string]any")
 	}
 	return kwargs, nil
+}
+
+// autoChatTemplateKwargs returns the chat_template_kwargs the auto model pins on every
+// path. It is the single source of truth shared by the chat completions and tokenize
+// paths, so they cannot drift apart again.
+//
+// enable_thinking is deliberately absent: vLLM derives it from reasoning_effort, and
+// injecting it re-creates the "thinking + none" 400 trap.
+func autoChatTemplateKwargs(cfg Config) map[string]any {
+	return map[string]any{"preserve_thinking": cfg.AutoPreserveThinking}
+}
+
+// autoModeRejection returns a client-facing detail message when the resolved auto mode
+// cannot be served by this deployment, or "" when the request is legal. Shared by the
+// chat and tokenize paths so both reject the same requests.
+func autoModeRejection(mode string, noInstruct bool) string {
+	if mode == modeInstruct && noInstruct {
+		return "no instruct mode on this deployment; omit reasoning_effort or use a thinking model"
+	}
+	return ""
 }
 
 // legacyCompletions handles /v1/completions (text completions API).
@@ -357,12 +378,11 @@ func transform(httpCli *http.Client, target *url.URL,
 				httpError(ctx, w, http.StatusBadRequest)
 				return
 			}
-			if mode == modeInstruct && cfg.NoInstruct {
+			if detail := autoModeRejection(mode, cfg.NoInstruct); detail != "" {
 				logger.Warn("auto model resolved to instruct mode but instruct is disabled on this deployment",
 					slog.String("virtual_model", modelName),
 				)
-				httpErrorWithDetail(ctx, w, http.StatusBadRequest,
-					"no instruct mode on this deployment; omit reasoning_effort or use a thinking model")
+				httpErrorWithDetail(ctx, w, http.StatusBadRequest, detail)
 				return
 			}
 			think = mode == modeThinking
@@ -384,14 +404,14 @@ func transform(httpCli *http.Client, target *url.URL,
 
 			// Never write enable_thinking here: vLLM derives it from reasoning_effort
 			// (enable_thinking = reasoning_effort != "none"), and injecting it
-			// re-creates the "thinking + none" 400 trap. Only preserve_thinking is pinned.
+			// re-creates the "thinking + none" 400 trap.
 			kwargs, err := chatTemplateKwargs(data)
 			if err != nil {
 				logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
 				httpError(ctx, w, http.StatusBadRequest)
 				return
 			}
-			kwargs["preserve_thinking"] = cfg.AutoPreserveThinking
+			maps.Copy(kwargs, autoChatTemplateKwargs(cfg))
 
 			// reasoning_effort is passed through untouched, including "none".
 		} else {

@@ -105,7 +105,7 @@ Configure the proxy using command-line flags or environment variables:
 | `-enable-auto-model` | `QWEN38RP_ENABLE_AUTO_MODEL` | `false` | Expose the mode-deriving `<prefix>-auto` model |
 | `-sampling-params` | `QWEN38RP_SAMPLING_PARAMS` | `fill` | Sampling policy for every virtual model: `off`, `fill`, or `enforce` |
 | `-auto-sampling-params` | `QWEN38RP_AUTO_SAMPLING_PARAMS` | (same as `-sampling-params`) | Sampling policy for `<prefix>-auto` only |
-| `-auto-preserve-thinking` | `QWEN38RP_AUTO_PRESERVE_THINKING` | `false` | Pin `preserve_thinking=true` on `<prefix>-auto` |
+| `-auto-preserve-thinking` | `QWEN38RP_AUTO_PRESERVE_THINKING` | `true` | Pin `preserve_thinking` on `<prefix>-auto` (set to `false` for compact context) |
 | `-enforce-sampling-params` | `QWEN38RP_ENFORCE_SAMPLING_PARAMS` | `false` | **Deprecated**: `true` maps to `-sampling-params=enforce`, `false` to `fill` |
 | `-virtual-model-prefix` | `QWEN38RP_VIRTUAL_MODEL_PREFIX` | `qwen38` | Prefix for virtual model names (e.g. `qwen38-27B`) |
 | `-no-instruct` | `QWEN38RP_NO_INSTRUCT` | `false` | Disable the instruct virtual model. **Required for the 2.4T-A95B max model**, which does not support instruct mode and recommends keeping thinking enabled. |
@@ -134,21 +134,27 @@ Resolution order:
 
 | Resolved mode | `enable_thinking` | `preserve_thinking` | Sampling |
 |---------------|-------------------|---------------------|----------|
-| thinking (default, or `effort` ≠ `none`) | **never written by the proxy** | `false` by default | Thinking |
-| instruct (`effort: none`, or `enable_thinking: false`) | **never written by the proxy** | `false` by default | Instruct |
+| thinking (default, or `effort` ≠ `none`) | **never written by the proxy** | `true` by default | Thinking |
+| instruct (`effort: none`, or `enable_thinking: false`) | **never written by the proxy** | `true` by default | Instruct |
 
 In auto mode the proxy **must not** write `enable_thinking`: vLLM derives it itself (`enable_thinking = reasoning_effort != "none"`), and injecting it re-creates the `thinking + none → 400` trap. The proxy only fixes sampling parameters.
 
-`preserve_thinking` is pinned to `false` unless `-auto-preserve-thinking` is set. The Qwen 3.8 template defaults it to `true`, which re-renders the thinking of every previous turn: that costs tokens and diverges from `<prefix>-thinking`. Pinning it is legal whatever the mode, because vLLM's contradiction guard only inspects `enable_thinking`.
+`preserve_thinking` is pinned to `true` by default, for three reasons:
 
-`/tokenize` pins the same `preserve_thinking` value, so counting tokens on a multi-turn conversation gives the same result as what the chat request actually renders.
+1. **It is the vendor default.** The Qwen 3.8 template treats an undefined `preserve_thinking` as `true`. A model named *auto* should adapt sampling, not silently change prompt semantics, otherwise it behaves differently from raw vLLM in a way clients cannot anticipate.
+2. **It keeps the prefix cache warm.** With `true`, turn N+1 contains turn N's assistant message byte-identically (thinking included), so the backend reuses the cached prefix and only pre-fills the new user turn. With `false` the prompt diverges at the start of the last assistant message, forcing a re-prefill of the assistant content *plus* the new user turn on **every** follow-up.
+3. **It does not duplicate an existing option.** `<prefix>-thinking` already means interleaved (thinking stripped between turns) and `<prefix>-thinking-preserve` means preserved; `-auto` is raw vLLM behaviour plus adapted sampling.
+
+Pinning it is legal whatever the mode, because vLLM's contradiction guard only inspects `enable_thinking`. Pass `-auto-preserve-thinking=false` (or `QWEN38RP_AUTO_PRESERVE_THINKING=false`) when compact context matters more than cache reuse.
+
+`/tokenize` pins the same `preserve_thinking` value, from the same helper the chat path uses, so counting tokens on a multi-turn conversation gives the same result as what the chat request actually renders.
 
 Edge cases:
 
 - **`-no-instruct` + a request resolving to instruct mode** (`reasoning_effort: "none"` or `enable_thinking: false`) → HTTP 400 with an explicit message. Instruct sampling is never applied silently on a deployment without instruct support.
 - **Contradictory request** (`enable_thinking: true` + `reasoning_effort: "none"`) → forwarded untouched, so vLLM's own template validation returns the error. The proxy never changes these semantics.
 - **`/v1/completions`** → same as any other virtual model: the name is validated and swapped, nothing else is touched (no chat template is applied there).
-- **`/tokenize`** → the name is swapped and only `preserve_thinking` is pinned — `enable_thinking` is never injected, so the backend keeps deriving the mode from `reasoning_effort`.
+- **`/tokenize`** → the name is swapped and the same `chat_template_kwargs` are pinned as on the chat path (`preserve_thinking` only, never `enable_thinking`), so token counts match the rendered prompt. A request the chat path would reject is rejected here too: with `-no-instruct`, an auto request resolving to instruct mode returns HTTP 400 rather than a token budget for an unservable request. The check is mode-based, so it also applies to raw `prompt` tokenization.
 
 #### Base Models
 

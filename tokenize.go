@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"syscall"
@@ -14,10 +15,11 @@ import (
 )
 
 func tokenize(httpCli *http.Client, target *url.URL,
-	servedModel string, profiles map[string]ModelProfile, autoPreserveThinking bool) http.HandlerFunc {
+	cfg Config, profiles map[string]ModelProfile) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
+		servedModel := cfg.ServedModelName
 
 		// Read request body
 		// Full body materialization is required to rewrite JSON fields in-place.
@@ -64,6 +66,25 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				slog.String("served_model", servedModel),
 			)
 
+			// The auto model is validated like on the chat path: the mode itself is not
+			// needed to render the prompt (preserve_thinking is mode-independent), but a
+			// request the chat path refuses to serve must not get a token count either.
+			if profile.Auto {
+				mode, err := resolveAutoMode(reqData)
+				if err != nil {
+					logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+					httpError(ctx, w, http.StatusBadRequest)
+					return
+				}
+				if detail := autoModeRejection(mode, cfg.NoInstruct); detail != "" {
+					logger.Warn("auto model resolved to instruct mode but instruct is disabled on this deployment",
+						slog.String("virtual_model", modelName),
+					)
+					httpErrorWithDetail(ctx, w, http.StatusBadRequest, detail)
+					return
+				}
+			}
+
 			// Apply the virtual model contract: inject chat_template_kwargs so the
 			// rendered template matches what the chat completions path would produce.
 			kwargsMap, err := chatTemplateKwargs(reqData)
@@ -73,11 +94,11 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				return
 			}
 			if profile.Auto {
-				// Mirror the chat path: pin preserve_thinking (otherwise the template
-				// default of true would re-render historical thinking and overcount
-				// tokens), but never enable_thinking, which the backend derives from
-				// reasoning_effort.
-				kwargsMap["preserve_thinking"] = autoPreserveThinking
+				// Mirror the chat path exactly: pin preserve_thinking (otherwise the
+				// template default of true would re-render historical thinking and
+				// overcount tokens), but never enable_thinking, which the backend
+				// derives from reasoning_effort.
+				maps.Copy(kwargsMap, autoChatTemplateKwargs(cfg))
 			} else {
 				kwargsMap["enable_thinking"] = profile.Think
 				kwargsMap["preserve_thinking"] = profile.PreserveThinking

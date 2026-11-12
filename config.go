@@ -149,7 +149,7 @@ func LoadConfig() (Config, error) {
 	enableAuto := flag.Bool("enable-auto-model", false, "Enable the auto virtual model, which derives the Qwen mode from reasoning_effort")
 	samplingParams := flag.String("sampling-params", string(SamplingPolicyFill), "Sampling parameters policy: off, fill, or enforce")
 	autoSamplingParams := flag.String("auto-sampling-params", "", "Sampling parameters policy for the auto model (defaults to -sampling-params)")
-	autoPreserveThinking := flag.Bool("auto-preserve-thinking", false, "Preserve historical thinking content in the auto model")
+	autoPreserveThinking := flag.Bool("auto-preserve-thinking", true, "Preserve historical thinking content in the auto model, matching the Qwen 3.8 template default and keeping the prompt prefix cacheable (set to false for compact context)")
 	enforceSampling := flag.Bool("enforce-sampling-params", false, "Deprecated: enforce sampling parameters, overriding client-provided values (use -sampling-params=enforce)")
 	virtualModelPrefix := flag.String("virtual-model-prefix", "qwen38", "Prefix for virtual model names exposed by the proxy")
 	noInstruct := flag.Bool("no-instruct", false, "Disable the instruct virtual model (for models that do not support instruct mode)")
