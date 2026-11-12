@@ -14,7 +14,7 @@ import (
 )
 
 func tokenize(httpCli *http.Client, target *url.URL,
-	servedModel string, profiles map[string]ModelProfile) http.HandlerFunc {
+	servedModel string, profiles map[string]ModelProfile, autoPreserveThinking bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
 		ctx := r.Context()
@@ -64,16 +64,21 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				slog.String("served_model", servedModel),
 			)
 
-			// Apply the virtual model contract: inject chat_template_kwargs.
-			// The auto model is the exception: like on the chat path, it must not pin
-			// enable_thinking, so the backend keeps deriving it from reasoning_effort.
-			if !profile.Auto {
-				kwargsMap, err := chatTemplateKwargs(reqData)
-				if err != nil {
-					logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
-					httpError(ctx, w, http.StatusBadRequest)
-					return
-				}
+			// Apply the virtual model contract: inject chat_template_kwargs so the
+			// rendered template matches what the chat completions path would produce.
+			kwargsMap, err := chatTemplateKwargs(reqData)
+			if err != nil {
+				logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+				httpError(ctx, w, http.StatusBadRequest)
+				return
+			}
+			if profile.Auto {
+				// Mirror the chat path: pin preserve_thinking (otherwise the template
+				// default of true would re-render historical thinking and overcount
+				// tokens), but never enable_thinking, which the backend derives from
+				// reasoning_effort.
+				kwargsMap["preserve_thinking"] = autoPreserveThinking
+			} else {
 				kwargsMap["enable_thinking"] = profile.Think
 				kwargsMap["preserve_thinking"] = profile.PreserveThinking
 			}

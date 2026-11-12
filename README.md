@@ -47,7 +47,7 @@ This proxy's primary purpose is to:
 5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
 6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
 7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
-8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize` (except for the auto model, which keeps deriving its mode from the request)
+8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize` (for the auto model, only `preserve_thinking` is pinned, so the rendered template matches the chat request)
 
 ## Installation
 
@@ -141,12 +141,14 @@ In auto mode the proxy **must not** write `enable_thinking`: vLLM derives it its
 
 `preserve_thinking` is pinned to `false` unless `-auto-preserve-thinking` is set. The Qwen 3.8 template defaults it to `true`, which re-renders the thinking of every previous turn: that costs tokens and diverges from `<prefix>-thinking`. Pinning it is legal whatever the mode, because vLLM's contradiction guard only inspects `enable_thinking`.
 
+`/tokenize` pins the same `preserve_thinking` value, so counting tokens on a multi-turn conversation gives the same result as what the chat request actually renders.
+
 Edge cases:
 
 - **`-no-instruct` + a request resolving to instruct mode** (`reasoning_effort: "none"` or `enable_thinking: false`) → HTTP 400 with an explicit message. Instruct sampling is never applied silently on a deployment without instruct support.
 - **Contradictory request** (`enable_thinking: true` + `reasoning_effort: "none"`) → forwarded untouched, so vLLM's own template validation returns the error. The proxy never changes these semantics.
 - **`/v1/completions`** → same as any other virtual model: the name is validated and swapped, nothing else is touched (no chat template is applied there).
-- **`/tokenize`** → the name is swapped and **no** `chat_template_kwargs` are injected, mirroring the chat path's mode derivation instead of pinning thinking.
+- **`/tokenize`** → the name is swapped and only `preserve_thinking` is pinned — `enable_thinking` is never injected, so the backend keeps deriving the mode from `reasoning_effort`.
 
 #### Base Models
 
@@ -191,7 +193,7 @@ The deprecated `-enforce-sampling-params` / `QWEN38RP_ENFORCE_SAMPLING_PARAMS` o
 - **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to configure thinking mode and `preserve_thinking`, which defaults to `true` in Qwen 3.8)
 - **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied; `<prefix>-auto` additionally derives the mode from `reasoning_effort`)
 - **`POST /v1/completions`**: Model name validated and swapped (no sampling params or thinking mode — raw prompt completions bypass the chat template)
-- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs` (except for `<prefix>-auto`, which derives its mode from the request), and forwards to vLLM's `/tokenize`
+- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs` (for `<prefix>-auto`, `preserve_thinking` only), and forwards to vLLM's `/tokenize`
 - **All other paths**: Passed through unchanged to the backend
 
 ## OpenAI SDK Examples
