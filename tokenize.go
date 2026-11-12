@@ -66,12 +66,18 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				slog.String("served_model", servedModel),
 			)
 
-			// The auto model is validated like on the chat path: the mode itself is not
-			// needed to render the prompt (preserve_thinking is mode-independent), but a
-			// request the chat path refuses to serve must not get a token count either.
+			// Resolve what the rendered prompt will contain, so the injected kwargs and
+			// the partial-count caveat agree with the chat path.
+			var (
+				mode             string // resolved auto mode
+				think            bool
+				preserveThinking bool
+			)
 			if profile.Auto {
-				mode, err := resolveAutoMode(reqData)
-				if err != nil {
+				// The auto model is validated like on the chat path: a request the chat
+				// path refuses to serve must not get a token count either.
+				var err error
+				if mode, err = resolveAutoMode(reqData); err != nil {
 					logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
 					httpError(ctx, w, http.StatusBadRequest)
 					return
@@ -83,6 +89,11 @@ func tokenize(httpCli *http.Client, target *url.URL,
 					httpErrorWithDetail(ctx, w, http.StatusBadRequest, detail)
 					return
 				}
+				think = mode == modeThinking
+				preserveThinking = cfg.AutoPreserveThinking
+			} else {
+				think = profile.Think
+				preserveThinking = profile.PreserveThinking
 			}
 
 			// Apply the virtual model contract: inject chat_template_kwargs so the
@@ -94,14 +105,32 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				return
 			}
 			if profile.Auto {
-				// Mirror the chat path exactly: pin preserve_thinking (otherwise the
-				// template default of true would re-render historical thinking and
-				// overcount tokens), but never enable_thinking, which the backend
-				// derives from reasoning_effort.
+				// preserve_thinking is pinned exactly like on the chat path.
 				maps.Copy(kwargsMap, autoChatTemplateKwargs(cfg))
+				// enable_thinking, on the other hand, must be pinned here and nowhere
+				// else: vLLM only derives enable_thinking from reasoning_effort in
+				// build_chat_params, which /tokenize never runs. Leaving it out would
+				// render a thinking prompt for an instruct request and over-count.
+				kwargsMap["enable_thinking"] = think
 			} else {
-				kwargsMap["enable_thinking"] = profile.Think
-				kwargsMap["preserve_thinking"] = profile.PreserveThinking
+				kwargsMap["enable_thinking"] = think
+				kwargsMap["preserve_thinking"] = preserveThinking
+			}
+
+			// vLLM's chat path also forwards reasoning_effort to the template, which
+			// renders an effort directive into the prompt (the default rendering is the
+			// xhigh one). /tokenize only sees it through chat_template_kwargs, so pin it
+			// for parity — but never inject a value the template rejects, or /tokenize
+			// would fail where the chat path succeeds.
+			if effort, ok := templateEffort(profile, reqData); ok && think {
+				kwargsMap["reasoning_effort"] = effort
+			}
+
+			// vLLM's /tokenize ignores message.reasoning_content while the chat template
+			// re-renders it as thinking history. Mirror it into the field /tokenize does
+			// render, so preserved thinking is counted.
+			if think && preserveThinking {
+				mirrorReasoningContent(reqData["messages"])
 			}
 
 			reqData["model"] = servedModel
@@ -140,6 +169,50 @@ func tokenize(httpCli *http.Client, target *url.URL,
 		w.WriteHeader(outResp.StatusCode)
 		if _, err = io.Copy(w, outResp.Body); err != nil {
 			logger.Error("failed to write response", slog.String("error", err.Error()))
+		}
+	}
+}
+
+// templateEfforts are the reasoning_effort values the Qwen 3.8 chat template accepts.
+// Other values (high, minimal, max, ...) are normalized by vLLM through
+// --reasoning-effort-map before the template sees them; injecting them as a template
+// kwarg makes /tokenize answer 400 where the chat path succeeds.
+var templateEfforts = map[string]struct{}{
+	"low": {}, "medium": {}, "xhigh": {}, "none": {},
+}
+
+// templateEffort returns the reasoning_effort the chat path renders into the prompt:
+// a pre-configured profile pins it, otherwise the client decides. The second return
+// value is false when the value is not one the template accepts.
+func templateEffort(profile ModelProfile, data map[string]any) (string, bool) {
+	effort := profile.Effort
+	if effort == "" {
+		effort, _ = data["reasoning_effort"].(string)
+	}
+	if _, ok := templateEfforts[effort]; !ok {
+		return "", false
+	}
+	return effort, true
+}
+
+// mirrorReasoningContent mirrors message.reasoning_content into message.reasoning, the
+// field vLLM's /tokenize renders as thinking history. reasoning_content is kept as-is, and
+// an existing reasoning field is never overwritten, so mirroring cannot double-count.
+func mirrorReasoningContent(rawMessages any) {
+	messages, ok := rawMessages.([]any)
+	if !ok {
+		return
+	}
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := message["reasoning"]; exists {
+			continue
+		}
+		if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
+			message["reasoning"] = reasoning
 		}
 	}
 }

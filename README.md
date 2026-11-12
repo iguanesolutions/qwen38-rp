@@ -40,14 +40,14 @@ This proxy's primary purpose is to:
    - `enable_thinking=true` for thinking modes
    - `enable_thinking=false` for instruct modes
    - `preserve_thinking=true` for preserve-thinking modes
-   - The auto model is the exception: it never writes `enable_thinking` (vLLM derives it from `reasoning_effort`) and only pins `preserve_thinking`.
+   - The auto model is the exception on the chat path: it never writes `enable_thinking` there (vLLM derives it from `reasoning_effort`) and only pins `preserve_thinking`. On `/tokenize` it *does* pin the derived value, because that endpoint never runs vLLM's derivation.
 4. **Enforce the official reasoning effort** on pre-configured models:
    - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort` with the official value.
    - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` — if the client sends a value it is passed through unchanged; if it is absent the backend applies its own default.
 5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
 6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
 7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
-8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize` (for the auto model, only `preserve_thinking` is pinned, so the rendered template matches the chat request)
+8. **Provide a `/tokenize` endpoint** that reproduces what the chat endpoint will render — model name, `chat_template_kwargs` (`enable_thinking`, `preserve_thinking`, `reasoning_effort`) and preserved thinking history — so its count matches `usage.prompt_tokens` (see [Token Counting](#token-counting))
 
 ## Installation
 
@@ -132,12 +132,14 @@ Resolution order:
 2. Otherwise, `reasoning_effort: "none"` → instruct mode.
 3. Otherwise → thinking mode.
 
-| Resolved mode | `enable_thinking` | `preserve_thinking` | Sampling |
-|---------------|-------------------|---------------------|----------|
-| thinking (default, or `effort` ≠ `none`) | **never written by the proxy** | `true` by default | Thinking |
-| instruct (`effort: none`, or `enable_thinking: false`) | **never written by the proxy** | `true` by default | Instruct |
+| Resolved mode | `enable_thinking` (chat) | `enable_thinking` (`/tokenize`) | `preserve_thinking` | Sampling |
+|---------------|--------------------------|---------------------------------|---------------------|----------|
+| thinking (default, or `effort` ≠ `none`) | **never written by the proxy** | pinned to `true` | `true` by default | Thinking |
+| instruct (`effort: none`, or `enable_thinking: false`) | **never written by the proxy** | pinned to `false` | `true` by default | Instruct |
 
-In auto mode the proxy **must not** write `enable_thinking`: vLLM derives it itself (`enable_thinking = reasoning_effort != "none"`), and injecting it re-creates the `thinking + none → 400` trap. The proxy only fixes sampling parameters.
+On the chat path the proxy **must not** write `enable_thinking`: vLLM derives it itself (`enable_thinking = reasoning_effort != "none"`), and injecting it re-creates the `thinking + none → 400` trap. The proxy only fixes sampling parameters there.
+
+On `/tokenize` the opposite is required: vLLM only applies that derivation inside `build_chat_params`, which `/tokenize` never runs, so an unpinned `enable_thinking` makes it render a *thinking* prompt for an instruct request (a 53-vs-13 token gap on a one-turn conversation). The invariant that matters is therefore not "identical kwargs" but **identical rendered prompt**: same messages, same `preserve_thinking`, and an `enable_thinking` that reflects the mode the chat path's backend would derive.
 
 `preserve_thinking` is pinned to `true` by default, for three reasons:
 
@@ -147,14 +149,14 @@ In auto mode the proxy **must not** write `enable_thinking`: vLLM derives it its
 
 Pinning it is legal whatever the mode, because vLLM's contradiction guard only inspects `enable_thinking`. Pass `-auto-preserve-thinking=false` (or `QWEN38RP_AUTO_PRESERVE_THINKING=false`) when compact context matters more than cache reuse.
 
-`/tokenize` pins the same `preserve_thinking` value, from the same helper the chat path uses, so counting tokens on a multi-turn conversation gives the same result as what the chat request actually renders.
+`/tokenize` pins the same `preserve_thinking` value, from the same helper the chat path uses, plus the resolved `enable_thinking` and, when the client sent one, the template-accepted `reasoning_effort`. Together with mirroring preserved thinking history, this makes its count match the chat prompt (see [Token Counting](#token-counting)).
 
 Edge cases:
 
 - **`-no-instruct` + a request resolving to instruct mode** (`reasoning_effort: "none"` or `enable_thinking: false`) → HTTP 400 with an explicit message. Instruct sampling is never applied silently on a deployment without instruct support.
 - **Contradictory request** (`enable_thinking: true` + `reasoning_effort: "none"`) → forwarded untouched, so vLLM's own template validation returns the error. The proxy never changes these semantics.
 - **`/v1/completions`** → same as any other virtual model: the name is validated and swapped, nothing else is touched (no chat template is applied there).
-- **`/tokenize`** → the name is swapped and the same `chat_template_kwargs` are pinned as on the chat path (`preserve_thinking` only, never `enable_thinking`), so token counts match the rendered prompt. A request the chat path would reject is rejected here too: with `-no-instruct`, an auto request resolving to instruct mode returns HTTP 400 rather than a token budget for an unservable request. The check is mode-based, so it also applies to raw `prompt` tokenization.
+- **`/tokenize`** → the name is swapped and the request is completed with what the chat template needs (`preserve_thinking`, the derived `enable_thinking`, the template-accepted `reasoning_effort`, and a `reasoning` mirror of preserved thinking history), because vLLM derives none of that on this endpoint. A request the chat path would reject is rejected here too: with `-no-instruct`, an auto request resolving to instruct mode returns HTTP 400 rather than a token budget for an unservable request. The check is mode-based, so it also applies to raw `prompt` tokenization.
 
 #### Base Models
 
@@ -193,13 +195,43 @@ The instruct model is omitted when `-no-instruct` is set. This is **required for
 
 The deprecated `-enforce-sampling-params` / `QWEN38RP_ENFORCE_SAMPLING_PARAMS` option is still honoured: `true` maps to `enforce`, `false` to `fill`. When both options are set, `-sampling-params` wins and a single warning is logged at startup.
 
+## Token Counting
+
+`/tokenize` reproduces the prompt the chat endpoint will render, so its count matches `usage.prompt_tokens`. Three vLLM behaviours have to be compensated, because `/tokenize` only sees `chat_template_kwargs` and never runs the chat path's parameter derivation:
+
+| What the chat path does | What `/tokenize` does on its own | Proxy compensation |
+|---|---|---|
+| derives `enable_thinking = reasoning_effort != "none"` | renders a thinking prompt every time | pins `enable_thinking` from the resolved mode |
+| forwards `reasoning_effort` to the template, which renders an effort directive (the default rendering equals the `xhigh` one, so `low`/`medium`/`none` are shorter) | ignores the top-level `reasoning_effort` | pins `reasoning_effort` in `chat_template_kwargs` |
+| renders `message.reasoning_content` as thinking history | ignores `reasoning_content`; only renders `message.reasoning` | mirrors `reasoning_content` into `reasoning` when thinking history is preserved |
+
+Measured on `qwen3.8-flash-next` served by vLLM 0.33 (chat `prompt_tokens` vs `/tokenize` `count`):
+
+| Payload | chat | `/tokenize` before | `/tokenize` now |
+|---|---|---|---|
+| 1 turn, default | 63 | 63 | 63 |
+| 1 turn, `effort: none` | 23 | 63 | 23 |
+| 1 turn, `effort: low` | 51 | 63 | 51 |
+| 1 turn, `effort: medium` | 21 | 63 | 21 |
+| 3 turns + thinking history, `preserve_thinking=true` | 97 | 95 | 97 |
+| 3 turns + thinking history, `preserve_thinking=false` | 79 | 91 | 79 |
+| raw `prompt`, no `messages` | — | forwarded as-is | forwarded as-is |
+
+Notes:
+
+- Only template-accepted effort values (`low`, `medium`, `xhigh`, `none`) are pinned. `high`, `minimal`, `max` or any custom value is normalized server-side by vLLM's `--reasoning-effort-map`, which the proxy cannot see; injecting such a value into `chat_template_kwargs` makes `/tokenize` answer 400 where the chat path succeeds, so it is left out and the count may be off by one directive.
+- Mirroring never double-counts: `reasoning_content` is kept, an existing `reasoning` field is never overwritten, and the mirror is only added when the mode is thinking with `preserve_thinking` on.
+- This relies on `/tokenize` rendering `message.reasoning`. If a future vLLM changes that, the integration tests below fail rather than silently drifting.
+
+Upstream `/tokenize` should apply the same `enable_thinking` derivation, forward `reasoning_effort` to the template, and render `reasoning_content`; the proxy workaround is a compatibility shim, not a substitute.
+
 ## Request Routing
 
 - **`GET /v1/models`**: Enriched (fetches backend models, validates served model, exposes virtual models)
 - **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to configure thinking mode and `preserve_thinking`, which defaults to `true` in Qwen 3.8)
 - **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied; `<prefix>-auto` additionally derives the mode from `reasoning_effort`)
 - **`POST /v1/completions`**: Model name validated and swapped (no sampling params or thinking mode — raw prompt completions bypass the chat template)
-- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs` (for `<prefix>-auto`, `preserve_thinking` only), and forwards to vLLM's `/tokenize`
+- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects the `chat_template_kwargs` and message fields that reproduce the chat template rendering (`enable_thinking`, `preserve_thinking`, `reasoning_effort`, and a `reasoning` mirror of preserved thinking history), and forwards to vLLM's `/tokenize`. See [Token Counting](#token-counting) for the measured parity
 - **All other paths**: Passed through unchanged to the backend
 
 ## OpenAI SDK Examples
@@ -324,6 +356,25 @@ sudo chown qwen38-rp:qwen38-rp /usr/local/bin/qwen38-rp
 ## Graceful Shutdown
 
 The server supports graceful shutdown with a 3-minute timeout to allow in-flight requests to complete. Send `SIGINT` or `SIGTERM` to initiate shutdown. When running under systemd, the proxy will automatically signal the service manager when ready and during shutdown.
+
+## Testing
+
+```bash
+# Same gate as CI
+go vet ./... && go test -race ./...
+```
+
+The suite covers the proxy behaviour (mode resolution, sampling policy, kwarg parity) without a backend. Count-level equality needs a live vLLM and is gated on an environment variable:
+
+```bash
+set -a; . ./.backend.env; set +a   # VLLM_BASE_URL, VLLM_API_KEY (gitignored)
+QWEN38RP_TEST_TARGET_URL="$VLLM_BASE_URL" go test -run Integration -v .
+# optional overrides:
+# QWEN38RP_TEST_SERVED_MODEL=Qwen/Qwen3.8-27B
+# QWEN38RP_TEST_API_KEY=...   (falls back to VLLM_API_KEY)
+```
+
+These integration tests generate with `max_tokens: 1` and assert relative equality between `/tokenize` and `usage.prompt_tokens`, never absolute numbers, so they stay portable across tokenizers and model revisions. They cover thinking history with both `preserve_thinking` values and the `low`/`medium` effort directives — the cases where a divergence is invisible at the kwargs level.
 
 ## License
 

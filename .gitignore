@@ -24,6 +24,10 @@ go.work.sum
 # env file
 .env
 
+# Local live-backend credentials used by the integration tests
+backend.env
+.backend.env
+
 
 # Dev
 /qwen38-rp
