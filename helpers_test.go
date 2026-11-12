@@ -13,30 +13,37 @@ func TestApplySamplingParams(t *testing.T) {
 	tests := []struct {
 		name     string
 		data     map[string]any
-		enforce  bool
-		wantTemp float64
-		wantTopP float64
+		policy   SamplingPolicy
+		wantTemp any
+		wantTopP any
 	}{
 		{
 			name:     "sets missing params",
 			data:     map[string]any{},
-			enforce:  false,
+			policy:   SamplingPolicyFill,
 			wantTemp: 1.0,
 			wantTopP: 0.95,
 		},
 		{
-			name:     "preserves existing when not enforcing",
+			name:     "preserves existing when filling",
 			data:     map[string]any{"temperature": 0.5},
-			enforce:  false,
+			policy:   SamplingPolicyFill,
 			wantTemp: 0.5,
 			wantTopP: 0.95,
 		},
 		{
 			name:     "overrides existing when enforcing",
 			data:     map[string]any{"temperature": 0.5},
-			enforce:  true,
+			policy:   SamplingPolicyEnforce,
 			wantTemp: 1.0,
 			wantTopP: 0.95,
+		},
+		{
+			name:     "adds nothing when off",
+			data:     map[string]any{"temperature": 0.5},
+			policy:   SamplingPolicyOff,
+			wantTemp: 0.5,
+			wantTopP: nil,
 		},
 	}
 
@@ -46,7 +53,7 @@ func TestApplySamplingParams(t *testing.T) {
 			for k, v := range tt.data {
 				data[k] = v
 			}
-			applySamplingParams(data, defaults, logger, tt.enforce)
+			applySamplingParams(data, defaults, modeThinking, tt.policy, logger)
 			if data["temperature"] != tt.wantTemp {
 				t.Errorf("temperature: want %v, got %v", tt.wantTemp, data["temperature"])
 			}

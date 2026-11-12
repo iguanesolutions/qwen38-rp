@@ -57,29 +57,36 @@ func stripHopByHopHeaders(req *http.Request) {
 	}
 }
 
-// applySamplingParams applies sampling parameters to request data
-// If enforce is true, parameters are always set, overriding any client-provided values
-func applySamplingParams(data map[string]any, samplingParams map[string]any, logger *slog.Logger, enforce bool) {
+// applySamplingParams applies the official sampling defaults of a Qwen mode according to policy:
+// off never touches the request, fill only sets the keys the client omitted, and enforce always
+// overwrites them. The applied values are logged at DEBUG level, never the request body.
+func applySamplingParams(data map[string]any, samplingParams map[string]any, mode string,
+	policy SamplingPolicy, logger *slog.Logger) {
+	if policy == SamplingPolicyOff {
+		logger.Debug("sampling parameters disabled by policy", slog.String("mode", mode))
+		return
+	}
+	attrs := make([]any, 0, 2+len(samplingParams))
+	attrs = append(attrs,
+		slog.String("mode", mode),
+		slog.String("policy", string(policy)),
+	)
 	for k, v := range samplingParams {
-		if _, ok := data[k]; ok {
-			if enforce {
-				logger.Debug("enforcing sampling parameter",
-					slog.Any("key", k),
-					slog.Any("old_value", data[k]),
-					slog.Any("new_value", v),
-				)
-				data[k] = v
-			} else {
-				logger.Debug("key already set in request, not modifying",
-					slog.Any("key", k),
-					slog.Any("value", data[k]),
-					slog.Any("default_value", v),
-				)
-			}
+		oldValue, exists := data[k]
+		if exists && policy != SamplingPolicyEnforce {
+			attrs = append(attrs, slog.Group(k,
+				slog.Any("old_value", oldValue),
+				slog.Any("new_value", oldValue),
+			))
 			continue
 		}
 		data[k] = v
+		attrs = append(attrs, slog.Group(k,
+			slog.Any("old_value", oldValue),
+			slog.Any("new_value", v),
+		))
 	}
+	logger.Debug("applied sampling parameters", attrs...)
 }
 
 // copyHeaders copies response headers from backend response to the client ResponseWriter,
@@ -102,6 +109,22 @@ func httpError(ctx context.Context, w http.ResponseWriter, statusCode int) {
 		http.StatusText(statusCode),
 		reqID,
 	)
+	writeErrorResponse(w, statusCode, message)
+}
+
+// httpErrorWithDetail writes an OpenAI-compatible JSON error response with an explicit
+// client-facing detail message, for errors the client can act upon.
+func httpErrorWithDetail(ctx context.Context, w http.ResponseWriter, statusCode int, detail string) {
+	reqID := ctx.Value(httplog.ReqIDKey)
+	message := fmt.Sprintf("%s - %s (request id #%v)",
+		http.StatusText(statusCode),
+		detail,
+		reqID,
+	)
+	writeErrorResponse(w, statusCode, message)
+}
+
+func writeErrorResponse(w http.ResponseWriter, statusCode int, message string) {
 	errResp := map[string]any{
 		"error": map[string]any{
 			"message": message,

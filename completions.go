@@ -20,6 +20,13 @@ const (
 	instructSuffix         = "instruct"
 	thinkingSuffix         = "thinking"
 	thinkingPreserveSuffix = "thinking-preserve"
+	autoSuffix             = "auto"
+)
+
+// Qwen 3.8 modes, as resolved by the auto virtual model.
+const (
+	modeThinking = "thinking"
+	modeInstruct = "instruct"
 )
 
 var extendedSuffixes = []string{"low", "medium", "xhigh"}
@@ -47,7 +54,10 @@ var (
 
 // ModelProfile defines the behavior of a virtual model.
 type ModelProfile struct {
-	Name             string
+	Name string
+	// Auto marks the mode-deriving virtual model: Think, SamplingParams and Effort are
+	// resolved per request from the client's reasoning_effort / chat_template_kwargs.
+	Auto             bool
 	Think            bool
 	PreserveThinking bool
 	Effort           string // empty = client configurable; else "low", "medium", or "xhigh"
@@ -57,13 +67,18 @@ type ModelProfile struct {
 // buildModelProfiles creates the virtual model registry.
 // Uses prefix for model names; adds 6 pre-configured ones if enableExtended is true.
 // If noInstruct is true, the instruct model is omitted (for variants that do not support it).
-func buildModelProfiles(prefix string, enableExtended bool, noInstruct bool) map[string]ModelProfile {
+// If enableAuto is true, the mode-deriving auto model is added as well.
+func buildModelProfiles(prefix string, enableExtended bool, noInstruct bool, enableAuto bool) map[string]ModelProfile {
 	instructModel := prefix + "-" + instructSuffix
 	thinkingModel := prefix + "-" + thinkingSuffix
 	thinkingPreserveModel := prefix + "-" + thinkingPreserveSuffix
 
 	profiles := map[string]ModelProfile{}
 
+	if enableAuto {
+		autoModel := prefix + "-" + autoSuffix
+		profiles[autoModel] = ModelProfile{Name: autoModel, Auto: true}
+	}
 	if !noInstruct {
 		profiles[instructModel] = ModelProfile{
 			Name: instructModel, Think: false, PreserveThinking: false,
@@ -93,6 +108,60 @@ func buildModelProfiles(prefix string, enableExtended bool, noInstruct bool) map
 	}
 
 	return profiles
+}
+
+// profileMode returns the Qwen mode name of a fixed profile, for logging.
+func profileMode(profile ModelProfile) string {
+	if profile.Think {
+		return modeThinking
+	}
+	return modeInstruct
+}
+
+// resolveAutoMode derives the Qwen mode of the auto virtual model from the request.
+//
+// Precedence: an explicit boolean chat_template_kwargs.enable_thinking wins; otherwise
+// reasoning_effort == "none" selects instruct mode and anything else thinking mode.
+// The resolved mode only drives sampling (and the response bug fix) — it is never
+// written back as enable_thinking, so the backend keeps deriving it from
+// reasoning_effort itself.
+func resolveAutoMode(data map[string]any) (string, error) {
+	if raw, present := data["chat_template_kwargs"]; present && raw != nil {
+		kwargs, ok := raw.(map[string]any)
+		if !ok {
+			return "", errors.New("chat_template_kwargs is not a map[string]any")
+		}
+		if rawEnableThinking, present := kwargs["enable_thinking"]; present {
+			if enableThinking, isBool := rawEnableThinking.(bool); isBool {
+				if enableThinking {
+					return modeThinking, nil
+				}
+				return modeInstruct, nil
+			}
+			// Non-boolean enable_thinking is ignored, leaving the default thinking mode.
+			return modeThinking, nil
+		}
+	}
+	if effort, ok := data["reasoning_effort"].(string); ok && effort == "none" {
+		return modeInstruct, nil
+	}
+	return modeThinking, nil
+}
+
+// chatTemplateKwargs returns the request's chat_template_kwargs map, creating it when
+// absent or null. A non-object value is an error.
+func chatTemplateKwargs(data map[string]any) (map[string]any, error) {
+	raw, present := data["chat_template_kwargs"]
+	if !present || raw == nil {
+		kwargs := map[string]any{}
+		data["chat_template_kwargs"] = kwargs
+		return kwargs, nil
+	}
+	kwargs, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New("chat_template_kwargs is not a map[string]any")
+	}
+	return kwargs, nil
 }
 
 // legacyCompletions handles /v1/completions (text completions API).
@@ -229,7 +298,9 @@ func fixModelNameInResponse(responseBody []byte, virtualModel string, logger *sl
 }
 
 func transform(httpCli *http.Client, target *url.URL,
-	servedModel string, profiles map[string]ModelProfile, enforceSamplingParams bool) http.HandlerFunc {
+	cfg Config, profiles map[string]ModelProfile) http.HandlerFunc {
+	samplingPolicy := cfg.samplingPolicy()
+	autoSamplingPolicy := cfg.autoSamplingPolicy()
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Prepare
 		logger := logger.With(httplog.GetReqIDSLogAttr(r.Context()))
@@ -271,49 +342,93 @@ func transform(httpCli *http.Client, target *url.URL,
 			return
 		}
 
-		logger.Info("model matched",
-			slog.String("virtual_model", modelName),
-			slog.Bool("think", profile.Think),
-			slog.Bool("preserve_thinking", profile.PreserveThinking),
-			slog.String("effort", profile.Effort),
-		)
-
-		// Apply sampling parameters
-		applySamplingParams(data, profile.SamplingParams, logger, enforceSamplingParams)
-
 		// Track the virtual model name requested by client (before override)
 		virtualModel := modelName
 		// Override model name for backend
-		data["model"] = servedModel
+		data["model"] = cfg.ServedModelName
 
-		// Set chat_template_kwargs
-		kwargs, ok := data["chat_template_kwargs"]
-		if !ok || kwargs == nil {
-			kwargs = map[string]any{}
-		}
-		kwargsMap, ok := kwargs.(map[string]any)
-		if !ok {
-			logger.Error("chat_template_kwargs is not a map[string]any")
-			httpError(ctx, w, http.StatusBadRequest)
-			return
-		}
-		kwargsMap["enable_thinking"] = profile.Think
-		kwargsMap["preserve_thinking"] = profile.PreserveThinking
-		data["chat_template_kwargs"] = kwargsMap
+		// think is the Qwen mode actually used by the request, for response fixing
+		think := profile.Think
 
-		// Handle reasoning_effort for pre-configured models (immutable contract)
-		if profile.Effort != "" {
-			if clientEffort, ok := data["reasoning_effort"].(string); ok && clientEffort != profile.Effort {
-				logger.Warn("overriding client reasoning_effort with pre-configured model value",
-					slog.String("virtual_model", modelName),
-					slog.String("client_effort", clientEffort),
-					slog.String("enforced_effort", profile.Effort),
-				)
+		if profile.Auto {
+			mode, err := resolveAutoMode(data)
+			if err != nil {
+				logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+				httpError(ctx, w, http.StatusBadRequest)
+				return
 			}
-			data["reasoning_effort"] = profile.Effort
+			if mode == modeInstruct && cfg.NoInstruct {
+				logger.Warn("auto model resolved to instruct mode but instruct is disabled on this deployment",
+					slog.String("virtual_model", modelName),
+				)
+				httpErrorWithDetail(ctx, w, http.StatusBadRequest,
+					"no instruct mode on this deployment; omit reasoning_effort or use a thinking model")
+				return
+			}
+			think = mode == modeThinking
+
+			logger.Info("model matched",
+				slog.String("virtual_model", modelName),
+				slog.Bool("auto", true),
+				slog.String("mode", mode),
+				slog.String("sampling_policy", string(autoSamplingPolicy)),
+				slog.Bool("preserve_thinking", cfg.AutoPreserveThinking),
+			)
+
+			// Apply the sampling defaults of the resolved mode
+			samplingParams := thinkingParams
+			if mode == modeInstruct {
+				samplingParams = instructParams
+			}
+			applySamplingParams(data, samplingParams, mode, autoSamplingPolicy, logger)
+
+			// Never write enable_thinking here: vLLM derives it from reasoning_effort
+			// (enable_thinking = reasoning_effort != "none"), and injecting it
+			// re-creates the "thinking + none" 400 trap. Only preserve_thinking is pinned.
+			kwargs, err := chatTemplateKwargs(data)
+			if err != nil {
+				logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+				httpError(ctx, w, http.StatusBadRequest)
+				return
+			}
+			kwargs["preserve_thinking"] = cfg.AutoPreserveThinking
+
+			// reasoning_effort is passed through untouched, including "none".
+		} else {
+			logger.Info("model matched",
+				slog.String("virtual_model", modelName),
+				slog.Bool("think", profile.Think),
+				slog.Bool("preserve_thinking", profile.PreserveThinking),
+				slog.String("effort", profile.Effort),
+			)
+
+			// Apply sampling parameters
+			applySamplingParams(data, profile.SamplingParams, profileMode(profile), samplingPolicy, logger)
+
+			// Set chat_template_kwargs
+			kwargsMap, err := chatTemplateKwargs(data)
+			if err != nil {
+				logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+				httpError(ctx, w, http.StatusBadRequest)
+				return
+			}
+			kwargsMap["enable_thinking"] = profile.Think
+			kwargsMap["preserve_thinking"] = profile.PreserveThinking
+
+			// Handle reasoning_effort for pre-configured models (immutable contract)
+			if profile.Effort != "" {
+				if clientEffort, ok := data["reasoning_effort"].(string); ok && clientEffort != profile.Effort {
+					logger.Warn("overriding client reasoning_effort with pre-configured model value",
+						slog.String("virtual_model", modelName),
+						slog.String("client_effort", clientEffort),
+						slog.String("enforced_effort", profile.Effort),
+					)
+				}
+				data["reasoning_effort"] = profile.Effort
+			}
+			// For base thinking models, do NOT touch reasoning_effort if absent —
+			// the backend enforces its own default.
 		}
-		// For base thinking models, do NOT touch reasoning_effort if absent —
-		// the backend enforces its own default.
 
 		// Marshal request body
 		requestBody, err = json.Marshal(data)
@@ -322,7 +437,11 @@ func transform(httpCli *http.Client, target *url.URL,
 			httpError(ctx, w, http.StatusInternalServerError)
 			return
 		}
-		logger.Debug("rewritten request body", slog.String("body", string(requestBody)))
+		// Request bodies are not logged for the auto model: the client's payload
+		// drives the mode resolution and can be large and sensitive.
+		if !profile.Auto {
+			logger.Debug("rewritten request body", slog.String("body", string(requestBody)))
+		}
 		// Track modified request
 		modifiedRequests.Add(1)
 		// Prepare outgoing request
@@ -375,7 +494,7 @@ func transform(httpCli *http.Client, target *url.URL,
 
 			// Only attempt JSON fixes on success responses; pass through errors as-is
 			if outResp.StatusCode >= 200 && outResp.StatusCode < 300 {
-				responseBody = fixNonStreamingResponse(responseBody, profile.Think, virtualModel, logger)
+				responseBody = fixNonStreamingResponse(responseBody, think, virtualModel, logger)
 			} else {
 				logger.Warn("backend returned error for non-streaming request, passing through raw response",
 					slog.Int("status", outResp.StatusCode),

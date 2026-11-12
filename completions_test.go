@@ -5,11 +5,18 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"testing"
 )
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// TestMain installs the package logger used by the handlers under test.
+func TestMain(m *testing.M) {
+	logger = testLogger()
+	os.Exit(m.Run())
 }
 
 func TestBuildModelProfiles(t *testing.T) {
@@ -18,6 +25,7 @@ func TestBuildModelProfiles(t *testing.T) {
 		prefix         string
 		enableExtended bool
 		noInstruct     bool
+		enableAuto     bool
 		wantModels     []string
 	}{
 		{
@@ -45,11 +53,31 @@ func TestBuildModelProfiles(t *testing.T) {
 			noInstruct:     true,
 			wantModels:     []string{"qwen38-thinking", "qwen38-thinking-preserve"},
 		},
+		{
+			name:       "auto",
+			prefix:     "qwen38",
+			enableAuto: true,
+			wantModels: []string{
+				"qwen38-auto", "qwen38-instruct", "qwen38-thinking", "qwen38-thinking-preserve",
+			},
+		},
+		{
+			name:           "auto without instruct",
+			prefix:         "qwen38",
+			enableExtended: true,
+			noInstruct:     true,
+			enableAuto:     true,
+			wantModels: []string{
+				"qwen38-auto", "qwen38-thinking", "qwen38-thinking-preserve",
+				"qwen38-thinking-low", "qwen38-thinking-medium", "qwen38-thinking-xhigh",
+				"qwen38-thinking-preserve-low", "qwen38-thinking-preserve-medium", "qwen38-thinking-preserve-xhigh",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildModelProfiles(tt.prefix, tt.enableExtended, tt.noInstruct)
+			got := buildModelProfiles(tt.prefix, tt.enableExtended, tt.noInstruct, tt.enableAuto)
 			if len(got) != len(tt.wantModels) {
 				t.Fatalf("expected %d models, got %d", len(tt.wantModels), len(got))
 			}
@@ -63,7 +91,7 @@ func TestBuildModelProfiles(t *testing.T) {
 }
 
 func TestBuildModelProfilesContent(t *testing.T) {
-	profiles := buildModelProfiles("qwen38", false, false)
+	profiles := buildModelProfiles("qwen38", false, false, true)
 
 	instruct, ok := profiles["qwen38-instruct"]
 	if !ok {
@@ -90,13 +118,27 @@ func TestBuildModelProfilesContent(t *testing.T) {
 		t.Error("thinking should have PreserveThinking=false")
 	}
 
-	extended := buildModelProfiles("qwen38", true, false)
+	extended := buildModelProfiles("qwen38", true, false, false)
 	low, ok := extended["qwen38-thinking-low"]
 	if !ok {
 		t.Fatal("thinking-low profile not found")
 	}
 	if low.Effort != "low" {
 		t.Errorf("expected effort low, got %q", low.Effort)
+	}
+
+	auto, ok := profiles["qwen38-auto"]
+	if !ok {
+		t.Fatal("auto profile not found")
+	}
+	if !auto.Auto {
+		t.Error("auto profile should be flagged as Auto")
+	}
+	if auto.SamplingParams != nil {
+		t.Error("auto profile should not carry fixed sampling params")
+	}
+	if auto.Effort != "" {
+		t.Error("auto profile should not pin an effort")
 	}
 }
 

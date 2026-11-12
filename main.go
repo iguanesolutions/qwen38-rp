@@ -36,7 +36,7 @@ func main() {
 	}
 
 	// Build virtual model profiles
-	profiles := buildModelProfiles(cfg.VirtualModelPrefix, cfg.EnableExtendedModels, cfg.NoInstruct)
+	profiles := buildModelProfiles(cfg.VirtualModelPrefix, cfg.EnableExtendedModels, cfg.NoInstruct, cfg.EnableAutoModel)
 	virtualModels := make([]string, 0, len(profiles))
 	for name := range profiles {
 		virtualModels = append(virtualModels, name)
@@ -77,7 +77,7 @@ func main() {
 		)
 	}))
 	http.HandleFunc("POST /v1/chat/completions", httplogger.LogFunc(
-		transform(httpClient, backendURL, cfg.ServedModelName, profiles, cfg.EnforceSamplingParams),
+		transform(httpClient, backendURL, cfg, profiles),
 	))
 	http.HandleFunc("POST /v1/completions", httplogger.LogFunc(
 		legacyCompletions(httpClient, backendURL, cfg.ServedModelName, profiles),
@@ -120,6 +120,10 @@ func main() {
 		slog.String("target", backendURL.String()),
 		slog.String("virtual_model_prefix", cfg.VirtualModelPrefix),
 		slog.Bool("extended_models", cfg.EnableExtendedModels),
+		slog.Bool("auto_model", cfg.EnableAutoModel),
+		slog.Bool("auto_preserve_thinking", cfg.AutoPreserveThinking),
+		slog.String("sampling_params", cfg.SamplingParams),
+		slog.String("auto_sampling_params", cfg.AutoSamplingParams),
 		slog.Bool("no_instruct", cfg.NoInstruct),
 		slog.Int("virtual_models", len(virtualModels)),
 	)

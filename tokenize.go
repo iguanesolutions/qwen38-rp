@@ -64,20 +64,19 @@ func tokenize(httpCli *http.Client, target *url.URL,
 				slog.String("served_model", servedModel),
 			)
 
-			// Apply the virtual model contract: inject chat_template_kwargs
-			kwargs, ok := reqData["chat_template_kwargs"]
-			if !ok || kwargs == nil {
-				kwargs = map[string]any{}
+			// Apply the virtual model contract: inject chat_template_kwargs.
+			// The auto model is the exception: like on the chat path, it must not pin
+			// enable_thinking, so the backend keeps deriving it from reasoning_effort.
+			if !profile.Auto {
+				kwargsMap, err := chatTemplateKwargs(reqData)
+				if err != nil {
+					logger.Error("invalid chat_template_kwargs", slog.String("error", err.Error()))
+					httpError(ctx, w, http.StatusBadRequest)
+					return
+				}
+				kwargsMap["enable_thinking"] = profile.Think
+				kwargsMap["preserve_thinking"] = profile.PreserveThinking
 			}
-			kwargsMap, ok := kwargs.(map[string]any)
-			if !ok {
-				logger.Error("chat_template_kwargs is not a map[string]any")
-				httpError(ctx, w, http.StatusBadRequest)
-				return
-			}
-			kwargsMap["enable_thinking"] = profile.Think
-			kwargsMap["preserve_thinking"] = profile.PreserveThinking
-			reqData["chat_template_kwargs"] = kwargsMap
 
 			reqData["model"] = servedModel
 		}

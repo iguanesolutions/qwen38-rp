@@ -23,6 +23,8 @@ This proxy is a **vLLM enhancement layer**. It sits directly in front of a vLLM 
 This proxy's primary purpose is to:
 
 1. **Expose Qwen 3.8's official modes as virtual model names**, so no client-side change is required:
+   - **Auto model** (enabled via `-enable-auto-model`):
+     - `qwen38-auto` — derives the mode (and its sampling defaults) from the request, for clients that can only express `reasoning_effort`
    - **Up to 3 base models** (instruct can be disabled via `-no-instruct`):
      - `qwen38-instruct` — Native instruct mode (no reasoning)
      - `qwen38-thinking` — Native thinking mode, `reasoning_effort` controllable by the client
@@ -38,13 +40,14 @@ This proxy's primary purpose is to:
    - `enable_thinking=true` for thinking modes
    - `enable_thinking=false` for instruct modes
    - `preserve_thinking=true` for preserve-thinking modes
+   - The auto model is the exception: it never writes `enable_thinking` (vLLM derives it from `reasoning_effort`) and only pins `preserve_thinking`.
 4. **Enforce the official reasoning effort** on pre-configured models:
    - When a pre-configured model is called (e.g., `qwen38-thinking-low`), the proxy **always overrides** any client-provided `reasoning_effort` with the official value.
    - For base thinking models (`qwen38-thinking`, `qwen38-thinking-preserve`), the proxy **does not touch** `reasoning_effort` — if the client sends a value it is passed through unchanged; if it is absent the backend applies its own default.
 5. **Rewrite the model name** to the actual backend model name (e.g., `Qwen/Qwen3.8-27B`) before forwarding to vLLM
 6. **Fix vLLM response bugs** where non-thinking, non-streaming responses incorrectly place content in `reasoning_content` or `reasoning` fields instead of `content`
 7. **Enrich `/v1/models` endpoint** by fetching backend models and exposing virtual models with the same metadata (permissions, max_model_len, etc.)
-8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize`
+8. **Provide a `/tokenize` endpoint** that replaces virtual model names with the backend model name and injects the matching `chat_template_kwargs` before forwarding to vLLM's `/tokenize` (except for the auto model, which keeps deriving its mode from the request)
 
 ## Installation
 
@@ -61,6 +64,7 @@ go build -o qwen38-rp .
   -target "http://127.0.0.1:8000" \
   -served-model "Qwen/Qwen3.8-27B" \
   -virtual-model-prefix "qwen38-27B" \
+  -enable-auto-model \
   -enable-extended-models
 ```
 
@@ -98,11 +102,51 @@ Configure the proxy using command-line flags or environment variables:
 | `-loglevel` | `QWEN38RP_LOGLEVEL` | `INFO` | Log level (COMPLETE, DEBUG, INFO, WARN, ERROR) |
 | `-served-model` | `QWEN38RP_SERVED_MODEL_NAME` | (required) | Backend model name to use in outgoing requests |
 | `-enable-extended-models` | `QWEN38RP_ENABLE_EXTENDED_MODELS` | `false` | Expose the 6 pre-configured models (low/medium/xhigh) |
-| `-enforce-sampling-params` | `QWEN38RP_ENFORCE_SAMPLING_PARAMS` | `false` | Enforce sampling parameters, overriding client-provided values |
+| `-enable-auto-model` | `QWEN38RP_ENABLE_AUTO_MODEL` | `false` | Expose the mode-deriving `<prefix>-auto` model |
+| `-sampling-params` | `QWEN38RP_SAMPLING_PARAMS` | `fill` | Sampling policy for every virtual model: `off`, `fill`, or `enforce` |
+| `-auto-sampling-params` | `QWEN38RP_AUTO_SAMPLING_PARAMS` | (same as `-sampling-params`) | Sampling policy for `<prefix>-auto` only |
+| `-auto-preserve-thinking` | `QWEN38RP_AUTO_PRESERVE_THINKING` | `false` | Pin `preserve_thinking=true` on `<prefix>-auto` |
+| `-enforce-sampling-params` | `QWEN38RP_ENFORCE_SAMPLING_PARAMS` | `false` | **Deprecated**: `true` maps to `-sampling-params=enforce`, `false` to `fill` |
 | `-virtual-model-prefix` | `QWEN38RP_VIRTUAL_MODEL_PREFIX` | `qwen38` | Prefix for virtual model names (e.g. `qwen38-27B`) |
 | `-no-instruct` | `QWEN38RP_NO_INSTRUCT` | `false` | Disable the instruct virtual model. **Required for the 2.4T-A95B max model**, which does not support instruct mode and recommends keeping thinking enabled. |
 
+### Virtual Model Layers
+
+All virtual models are named `<prefix>-<suffix>` and come in three layers:
+
+| Layer | Models | Mode | `reasoning_effort` |
+|-------|--------|------|--------------------|
+| auto | `<prefix>-auto` | derived per request | read to select the mode, forwarded untouched |
+| fixed | `<prefix>-instruct`, `<prefix>-thinking`, `<prefix>-thinking-preserve` | pinned | passed through (thinking), ignored (instruct) |
+| optional fixed | `<prefix>-thinking[-preserve]-{low,medium,xhigh}` | pinned | pinned (immutable) |
+
 ### Virtual Model Behavior
+
+#### Auto Model (requires `-enable-auto-model`)
+
+`<prefix>-auto` targets clients that can express `reasoning_effort` but cannot send `chat_template_kwargs` (typically OpenAI SDK users). The proxy derives the Qwen mode from the request and applies the matching sampling defaults.
+
+Resolution order:
+
+1. `chat_template_kwargs.enable_thinking`, when present and boolean, wins: `true` → thinking, `false` → instruct. A non-boolean value is ignored.
+2. Otherwise, `reasoning_effort: "none"` → instruct mode.
+3. Otherwise → thinking mode.
+
+| Resolved mode | `enable_thinking` | `preserve_thinking` | Sampling |
+|---------------|-------------------|---------------------|----------|
+| thinking (default, or `effort` ≠ `none`) | **never written by the proxy** | `false` by default | Thinking |
+| instruct (`effort: none`, or `enable_thinking: false`) | **never written by the proxy** | `false` by default | Instruct |
+
+In auto mode the proxy **must not** write `enable_thinking`: vLLM derives it itself (`enable_thinking = reasoning_effort != "none"`), and injecting it re-creates the `thinking + none → 400` trap. The proxy only fixes sampling parameters.
+
+`preserve_thinking` is pinned to `false` unless `-auto-preserve-thinking` is set. The Qwen 3.8 template defaults it to `true`, which re-renders the thinking of every previous turn: that costs tokens and diverges from `<prefix>-thinking`. Pinning it is legal whatever the mode, because vLLM's contradiction guard only inspects `enable_thinking`.
+
+Edge cases:
+
+- **`-no-instruct` + a request resolving to instruct mode** (`reasoning_effort: "none"` or `enable_thinking: false`) → HTTP 400 with an explicit message. Instruct sampling is never applied silently on a deployment without instruct support.
+- **Contradictory request** (`enable_thinking: true` + `reasoning_effort: "none"`) → forwarded untouched, so vLLM's own template validation returns the error. The proxy never changes these semantics.
+- **`/v1/completions`** → same as any other virtual model: the name is validated and swapped, nothing else is touched (no chat template is applied there).
+- **`/tokenize`** → the name is swapped and **no** `chat_template_kwargs` are injected, mirroring the chat path's mode derivation instead of pinning thinking.
 
 #### Base Models
 
@@ -127,20 +171,46 @@ The instruct model is omitted when `-no-instruct` is set. This is **required for
 
 **Golden rule:** extended models are an immutable contract. The proxy always overrides `reasoning_effort` when they are called. This allows clients that do not expose `reasoning_effort` to access predefined reasoning profiles by simply selecting the appropriate model.
 
-### Enforce Sampling Parameters
+### Sampling Parameters Policy
 
-By default, the proxy only sets sampling parameters if they are not already present in the request. When `-enforce-sampling-params` is enabled, the proxy will **always override** client-provided sampling parameters with the predefined values for the detected mode.
+`-sampling-params` selects how the official sampling defaults of the detected mode are applied:
+
+| Value | Behaviour |
+|-------|-----------|
+| `off` | never modify sampling parameters |
+| `fill` | set only the keys the client omitted (default) |
+| `enforce` | always overwrite the client's values |
+
+`-auto-sampling-params` overrides the policy for `<prefix>-auto` only, and defaults to the global policy when unset.
+
+The deprecated `-enforce-sampling-params` / `QWEN38RP_ENFORCE_SAMPLING_PARAMS` option is still honoured: `true` maps to `enforce`, `false` to `fill`. When both options are set, `-sampling-params` wins and a single warning is logged at startup.
 
 ## Request Routing
 
 - **`GET /v1/models`**: Enriched (fetches backend models, validates served model, exposes virtual models)
 - **`POST /v1/responses`**: Returns HTTP 501 Not Implemented by design (vLLM's Responses API doesn't support `chat_template_kwargs` needed to configure thinking mode and `preserve_thinking`, which defaults to `true` in Qwen 3.8)
-- **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied)
+- **`POST /v1/chat/completions`**: Transformed (sampling params + thinking mode + reasoning effort applied; `<prefix>-auto` additionally derives the mode from `reasoning_effort`)
 - **`POST /v1/completions`**: Model name validated and swapped (no sampling params or thinking mode — raw prompt completions bypass the chat template)
-- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs`, and forwards to vLLM's `/tokenize`
+- **`POST /tokenize`**: Replaces virtual model names with backend model name, injects matching `chat_template_kwargs` (except for `<prefix>-auto`, which derives its mode from the request), and forwards to vLLM's `/tokenize`
 - **All other paths**: Passed through unchanged to the backend
 
 ## OpenAI SDK Examples
+
+### Auto model (mode derived from reasoning_effort)
+
+With `-enable-auto-model`, a plain OpenAI client gets the right mode and the right sampling defaults without any vendor-specific parameter:
+
+```python
+completion = client.chat.completions.create(
+    model="qwen38-auto",
+    messages=messages,
+    reasoning_effort="none",  # instruct mode + instruct sampling defaults
+    stream=True,
+    stream_options={"include_usage": True},
+)
+```
+
+Omit `reasoning_effort` (or set any other supported level) to get thinking mode with thinking sampling defaults.
 
 ### Base model (client controls reasoning_effort)
 
